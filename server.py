@@ -799,20 +799,44 @@ async def hold(
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
-    # --- Feel mode: store as feel type, minimal metadata ---
-    # --- Feel 模式：存为 feel 类型，最少元数据 ---
+    # --- Feel mode: store as feel type, with auto-tagging for searchability ---
+    # --- Feel 模式：存为 feel 类型，自动打标以支持检索 ---
     if feel:
         # Feel valence/arousal = model's own perspective
         feel_valence = valence if 0 <= valence <= 1 else 0.5
         feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
+
+        # --- Auto-tag feel for searchability (tags, name, domain) ---
+        # --- 自动为 feel 生成标签和名称，使其可被检索 ---
+        feel_tags = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        feel_name = name.strip() if name and name.strip() else None
+        feel_domain = ["feel"]
+        try:
+            analysis = await dehydrator.analyze(content)
+            if not feel_tags:
+                feel_tags = analysis.get("tags", [])
+            # Always add "feel" tag for identification
+            if "feel" not in feel_tags:
+                feel_tags.append("feel")
+            if not feel_name:
+                feel_name = analysis.get("suggested_name", None)
+            # Keep domain as ["feel"] but add analyzed domain too
+            extra_domain = analysis.get("domain", [])
+            if extra_domain and extra_domain != ["未分类"]:
+                feel_domain = list(dict.fromkeys(["feel"] + extra_domain))
+        except Exception as e:
+            logger.warning(f"Feel auto-tagging failed, using minimal metadata: {e}")
+            if "feel" not in feel_tags:
+                feel_tags.append("feel")
+
         bucket_id = await bucket_mgr.create(
             content=content,
-            tags=[],
+            tags=feel_tags,
             importance=5,
-            domain=[],
+            domain=feel_domain,
             valence=feel_valence,
             arousal=feel_arousal,
-            name=None,
+            name=feel_name,
             bucket_type="feel",
         )
         try:
@@ -1142,8 +1166,8 @@ async def pulse(include_archive: bool = False) -> str:
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
 @mcp.tool()
-async def dream() -> str:
-    """做梦——读取最近新增的记忆桶,供你自省。读完后可以trace(resolved=1)放下,或hold(feel=True)写感受。"""
+async def dream(include_feel: bool = False) -> str:
+    """做梦——读取最近新增的记忆桶,供你自省。读完后可以trace(resolved=1)放下,或hold(feel=True)写感受。include_feel=True时同时读取最近的feel。"""
     await decay_engine.ensure_started()
 
     try:
@@ -1164,7 +1188,27 @@ async def dream() -> str:
     candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
     recent = candidates[:10]
 
-    if not recent:
+    # --- Feel section: include recent feels if requested ---
+    feel_parts = []
+    if include_feel:
+        feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
+        feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        recent_feels = feels[:10]
+        for f in recent_feels:
+            meta = f["metadata"]
+            created = meta.get("created", "")
+            feel_name = meta.get("name", f["id"])
+            feel_tags = ",".join(meta.get("tags", []))
+            val = meta.get("valence", 0.5)
+            aro = meta.get("arousal", 0.3)
+            feel_parts.append(
+                f"[{feel_name}] V{val:.1f}/A{aro:.1f} "
+                f"创建:{created} 标签:{feel_tags}\n"
+                f"ID: {f['id']}\n"
+                f"{strip_wikilinks(f['content'][:500])}"
+            )
+
+    if not recent and not feel_parts:
         return "没有需要消化的新记忆。"
 
     parts = []
@@ -1258,7 +1302,9 @@ async def dream() -> str:
             logger.warning(f"Dream crystallization hint failed: {e}")
 
     final_text = header + "\n---\n".join(parts) + connection_hint + crystal_hint
-    await _fire_webhook("dream", {"recent": len(recent), "chars": len(final_text)})
+    if feel_parts:
+        final_text += "\n\n=== 你留下的 feel ===\n" + "\n---\n".join(feel_parts)
+    await _fire_webhook("dream", {"recent": len(recent), "feels": len(feel_parts), "chars": len(final_text)})
     return final_text
 
 
