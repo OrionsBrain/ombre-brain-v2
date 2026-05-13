@@ -545,7 +545,7 @@ async def breath(
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
-    if not query or not query.strip():
+    if (not query or not query.strip()) and domain.strip().lower() != "feel":
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception as e:
