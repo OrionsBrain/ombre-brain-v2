@@ -7,7 +7,7 @@ __pycache__/
 .claude/hooks/__pycache__/
 .vscode/
 config.yaml
-buckets/
+/buckets/
 *.log
 server.log
 plan.md
