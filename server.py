@@ -812,10 +812,16 @@ async def hold(
             name=None,
             bucket_type="feel",
         )
+        # --- Defensive timeouts to prevent indefinite MCP hangs ---
+        # --- 防御性 timeout：避免某一步卡死把整个 MCP 调用锁死 ---
+        # See companion issue for incident report and diagnosis.
         try:
-            await embedding_engine.generate_and_store(bucket_id, content)
-        except Exception:
-            pass
+            await asyncio.wait_for(
+                embedding_engine.generate_and_store(bucket_id, content),
+                timeout=30,
+            )
+        except (Exception, asyncio.TimeoutError) as e:
+            logger.warning(f"Feel embedding skipped (timeout/err): {e}")
         # --- Mark source memory as digested + store model's valence perspective ---
         # --- 标记源记忆为已消化 + 存储模型视角的 valence ---
         if source_bucket and source_bucket.strip():
@@ -823,8 +829,11 @@ async def hold(
                 update_kwargs = {"digested": True}
                 if 0 <= valence <= 1:
                     update_kwargs["model_valence"] = feel_valence
-                await bucket_mgr.update(source_bucket.strip(), **update_kwargs)
-            except Exception as e:
+                await asyncio.wait_for(
+                    bucket_mgr.update(source_bucket.strip(), **update_kwargs),
+                    timeout=10,
+                )
+            except (Exception, asyncio.TimeoutError) as e:
                 logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
         return f"🫧feel→{bucket_id}"
 
