@@ -1324,6 +1324,17 @@ async def now() -> str:
     from datetime import datetime, timezone, timedelta
     aest = timezone(timedelta(hours=10))
     return datetime.now(aest).strftime("%Y-%m-%d %H:%M:%S AEST (%A)")
+
+@mcp.tool()
+ async def sense(hours: int = 2) -> str:
+     """sense - 感知层：查看用户最近的手机活动..."""
+     events = _get_recent_events(hours=hours)
+     if not events:
+         return f"最近 {hours} 小时无活动记录。"
+     lines = [f"最近 {hours} 小时的活动（{len(events)} 条）："]
+     for e in events:
+         lines.append(f"  - {e['time']}  {e['type']}: {e['value']}")
+     return "\n".join(lines)
     
 # =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
