@@ -167,6 +167,7 @@ def _is_setup_needed() -> bool:
 def _verify_any_password(password: str) -> bool:
     """Check password against env var (first) or stored hash."""
     env_pwd = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")
+    print("DEBUG PASSWORD:", repr(env_pwd))
     if env_pwd:
         return hmac.compare_digest(password, env_pwd)
     stored = _load_password_hash()
