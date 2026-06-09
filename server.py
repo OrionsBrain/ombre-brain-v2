@@ -352,6 +352,10 @@ async def hold(
     """存储单条记忆。tags逗号分隔,importance 1-10。pinned=True永久钉选。feel=第一人称感受(会附加在桶上)。status=pending_followup标记有后续(不走自动遗忘)。importance>=8自动进入永久层。"""
     await decay_engine.ensure_started()
 
+    # --- Normalize optional params / 规范化可选参数 ---
+    feel = (feel or "").strip()
+    status = (status or "").strip()
+
     # --- Input validation / 输入校验 ---
     if not content or not content.strip():
         return "内容为空，无法存储。"
@@ -395,8 +399,8 @@ async def hold(
             pinned=True,
         )
         # Attach feeling if provided
-        if feel and feel.strip():
-            await bucket_mgr.add_feeling(bucket_id, feel.strip())
+        if feel:
+            await bucket_mgr.add_feeling(bucket_id, feel)
         return f"📌钉选→{bucket_id} {','.join(domain)}"
 
     # --- Step 2: merge or create / 合并或新建 ---
@@ -411,22 +415,20 @@ async def hold(
     )
 
     # Attach feeling if provided (need to find the bucket ID)
-    if feel and feel.strip():
-        # For merged buckets, result_name is the bucket name; for new, it's the ID
-        # We search for it to get the actual ID
+    if feel:
         try:
             found = await bucket_mgr.search(content, limit=1)
             if found:
-                await bucket_mgr.add_feeling(found[0]["id"], feel.strip())
+                await bucket_mgr.add_feeling(found[0]["id"], feel)
         except Exception:
             logger.warning("Failed to attach feeling to bucket / 附加感受失败")
 
     # Apply status marking (pending_followup prevents auto-expiry)
-    if status and status.strip():
+    if status:
         try:
             found = await bucket_mgr.search(content, limit=1)
             if found:
-                await bucket_mgr.update(found[0]["id"], followup_status=status.strip())
+                await bucket_mgr.update(found[0]["id"], followup_status=status)
         except Exception:
             logger.warning("Failed to set status on bucket / 设置状态失败")
 
@@ -493,6 +495,20 @@ async def grow(content: str, session_summary: bool = False) -> str:
         return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}"
 
     # --- Step 1: let API split and organize / 让 API 拆分整理 ---
+    # First, save original text as raw backup (low importance, won't surface but searchable)
+    try:
+        await bucket_mgr.create(
+            content=content.strip(),
+            tags=["raw_backup", "grow_original"],
+            importance=1,
+            domain=["原文备份"],
+            valence=0.5,
+            arousal=0.1,
+            name=f"grow原文备份",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to save raw backup / 原文备份失败: {e}")
+
     try:
         items = await dehydrator.digest(content)
     except Exception as e:
