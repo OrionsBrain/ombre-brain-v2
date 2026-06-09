@@ -609,7 +609,13 @@ class BucketManager:
                 if meta.get("resolved", False):
                     normalized *= 0.3
 
-                if normalized >= self.fuzzy_threshold:
+                # Permanent/pinned buckets bypass threshold (always included if any match)
+                # 永久/钉选桶跳过阈值（只要有匹配就一定返回）
+                is_permanent = meta.get("pinned") or meta.get("type") == "permanent"
+                if is_permanent and topic_score > 0:
+                    bucket["score"] = round(normalized, 2)
+                    scored.append(bucket)
+                elif normalized >= self.fuzzy_threshold:
                     bucket["score"] = round(normalized, 2)
                     scored.append(bucket)
             except Exception as e:
