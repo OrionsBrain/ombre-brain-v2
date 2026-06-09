@@ -39,6 +39,7 @@ import frontmatter
 import jieba
 from rapidfuzz import fuzz
 
+
 from utils import generate_bucket_id, sanitize_name, safe_path, now_iso
 
 logger = logging.getLogger("ombre_brain.bucket")
