@@ -44,7 +44,12 @@ import time
 import json as _json_lib
 import sqlite3
 import httpx
+from datetime import datetime, timezone, timedelta
 
+AEST = timezone(timedelta(hours=10))
+
+def _now_aest() -> str:
+    return datetime.now(AEST).strftime("%Y-%m-%d %H:%M:%S")
 
 # --- Ensure same-directory modules can be imported ---
 # --- 确保同目录下的模块能被正确导入 ---
@@ -118,7 +123,7 @@ def _init_events_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
             value TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at)")
@@ -129,14 +134,14 @@ def _record_event(event_type: str, value: str) -> bool:
     """Record an event, with 5-min dedup for same type. Returns True if recorded."""
     conn = sqlite3.connect(_events_db_path)
     # Dedup: skip if same type within 5 minutes
-    row = conn.execute(
-        "SELECT id FROM events WHERE type = ? AND created_at > datetime('now', '-5 minutes') LIMIT 1",
-        (event_type,)
-    ).fetchone()
+row = conn.execute(
+    "SELECT id FROM events WHERE type = ? AND created_at > datetime(?, '-5 minutes') LIMIT 1",
+    (event_type, _now_aest())
+).fetchone()
     if row:
         conn.close()
         return False
-    conn.execute("INSERT INTO events (type, value) VALUES (?, ?)", (event_type, value))
+    conn.execute("INSERT INTO events (type, value) VALUES (?, ?)", (event_type, value, _now_aest()))
     conn.commit()
     conn.close()
     return True
@@ -145,9 +150,9 @@ def _get_recent_events(hours: int = 6, limit: int = 50) -> list[dict]:
     """Get recent events within the specified hours."""
     conn = sqlite3.connect(_events_db_path)
     rows = conn.execute(
-        "SELECT type, value, created_at FROM events WHERE created_at > datetime('now', ? || ' hours') ORDER BY created_at DESC LIMIT ?",
-        (f"-{hours}", limit)
-    ).fetchall()
+    "SELECT type, value, created_at FROM events WHERE created_at > datetime(?, ? || ' hours') ORDER BY created_at DESC LIMIT ?",
+    (_now_aest(), f"-{hours}", limit)
+).fetchall()
     conn.close()
     return [{"type": r[0], "value": r[1], "time": r[2]} for r in rows]
 
@@ -1327,7 +1332,7 @@ async def now() -> str:
 
 
 @mcp.tool()
-async def sense(hours: int = 6) -> str:
+async def sense(hours: int = 3) -> str:
     """sense - 感知层：查看用户最近的手机活动（由 iOS 快捷指令自动上报）。
     hours: 查看最近几小时的活动，默认 6 小时。
     无活动时返回空。"""
