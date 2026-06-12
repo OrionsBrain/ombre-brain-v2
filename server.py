@@ -134,14 +134,14 @@ def _record_event(event_type: str, value: str) -> bool:
     """Record an event, with 5-min dedup for same type. Returns True if recorded."""
     conn = sqlite3.connect(_events_db_path)
     # Dedup: skip if same type within 5 minutes
-row = conn.execute(
+    row = conn.execute(
     "SELECT id FROM events WHERE type = ? AND created_at > datetime(?, '-5 minutes') LIMIT 1",
     (event_type, _now_aest())
 ).fetchone()
     if row:
         conn.close()
         return False
-    conn.execute("INSERT INTO events (type, value) VALUES (?, ?)", (event_type, value, _now_aest()))
+    conn.execute("INSERT INTO events (type, value, created_at) VALUES (?, ?, ?)", (event_type, value, _now_aest()))
     conn.commit()
     conn.close()
     return True
