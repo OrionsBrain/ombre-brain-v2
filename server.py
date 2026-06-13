@@ -10,8 +10,8 @@
 # 核心职责：
 #   - Initialize config, bucket manager, dehydrator, decay engine
 #     初始化配置、记忆桶管理器、脱水器、衰减引擎
-#   - Expose 5 MCP tools:
-#     暴露 5 个 MCP 工具：
+#   - Expose MCP tools:
+#     暴露 MCP 工具：
 #       breath — Surface unresolved memories or search by keyword
 #                浮现未解决记忆 或 按关键词检索
 #       hold   — Store a single memory
@@ -20,6 +20,10 @@
 #                日记归档，自动拆分多桶
 #       trace  — Modify metadata / resolved / delete
 #                修改元数据 / resolved 标记 / 删除
+#       daily_recall — Return one full daily recall memory
+#                返回一条完整的「那年今日」回忆
+#       update_status — Update current life status
+#                更新近况层
 #       pulse  — System status + bucket listing
 #                系统状态 + 所有桶列表
 #
@@ -32,11 +36,12 @@
 
 import os
 import sys
+import json
 import random
 import logging
 import asyncio
 import httpx
-from collections import Counter
+from datetime import datetime
 from typing import Optional
 
 # --- Ensure same-directory modules can be imported ---
@@ -48,7 +53,7 @@ from mcp.server.fastmcp import FastMCP
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
-from utils import load_config, setup_logging
+from utils import load_config, setup_logging, now_iso
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -61,41 +66,95 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 
 
-def _format_permanent_directory(buckets: list[dict]) -> tuple[list[str], str]:
+def _last_surfaced_key(bucket: dict) -> str:
     """
-    Split permanent index into core pinned entries and grouped archive counts.
-    将永久目录拆成核心钉选条目 + 档案层分组计数。
+    Sort key for rotation pools: empty/invalid last_surfaced comes first.
+    轮换池排序键：last_surfaced 为空或非法的优先。
     """
-    core_index = []
-    archive_groups = Counter()
+    value = bucket.get("metadata", {}).get("last_surfaced", "")
+    if not value:
+        return ""
+    try:
+        datetime.fromisoformat(str(value))
+        return str(value)
+    except (ValueError, TypeError):
+        return ""
 
-    for bucket in buckets:
-        meta = bucket.get("metadata", {})
-        is_permanent = meta.get("type") == "permanent"
-        is_core = meta.get("pinned", False)
-        if not (is_permanent or is_core):
+
+def _format_status_sms(status_text: str) -> str:
+    """
+    Format current_status.md as one or two SMS-like lines.
+    将近况层整理成一两条短信式近况。
+    """
+    if not status_text:
+        return "（暂无近况）"
+
+    cleaned_lines = []
+    for line in status_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("更新时间"):
             continue
+        cleaned_lines.append(stripped)
 
-        if is_core:
-            name = meta.get("name", bucket.get("id", "未命名"))
-            keywords = ",".join(meta.get("tags", [])[:5])
-            core_index.append(f"📌 {name} [{keywords}]")
+    paragraphs = []
+    current = []
+    for line in cleaned_lines:
+        if line in ("---", "——"):
+            if current:
+                paragraphs.append(" ".join(current).strip())
+                current = []
             continue
+        current.append(line)
+    if current:
+        paragraphs.append(" ".join(current).strip())
+    if not paragraphs and cleaned_lines:
+        paragraphs = [" ".join(cleaned_lines).strip()]
 
-        tags = [t for t in meta.get("tags", []) if isinstance(t, str) and t.strip()]
-        domains = [d for d in meta.get("domain", []) if isinstance(d, str) and d.strip()]
-        group_name = tags[0].strip() if tags else (domains[0].strip() if domains else "未分类")
-        archive_groups[group_name] += 1
+    if len(paragraphs) >= 2:
+        return f"事实近况：{paragraphs[0]}\n状态近况：{paragraphs[1]}"
+    return paragraphs[0] if paragraphs else "（暂无近况）"
 
-    archive_summary = ""
-    if archive_groups:
-        grouped = [
-            f"{name} ({count})"
-            for name, count in sorted(archive_groups.items(), key=lambda item: (-item[1], item[0]))
-        ]
-        archive_summary = "📁 " + " · ".join(grouped) + " — 搜索关键词展开"
 
-    return core_index, archive_summary
+def _extract_summary_line(content: str, limit: int = 120) -> str:
+    """
+    Extract one summary sentence from stored session summary content.
+    从对话摘要桶里取一句摘要，避免把 JSON 原样吐出来。
+    """
+    text = (content or "").strip()
+    if not text:
+        return "（暂无未处理摘要）"
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            summary = parsed.get("summary") or parsed.get("摘要")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:limit]
+    return text[:limit]
+
+
+async def _surface_oldest_bucket(buckets: list[dict], flag: str) -> Optional[dict]:
+    """
+    Pick the least recently surfaced bucket from a metadata-flagged pool.
+    从指定 metadata 标记池里选最久未浮现的一条，并更新 last_surfaced。
+    """
+    candidates = [
+        b for b in buckets
+        if b.get("metadata", {}).get(flag, False)
+    ]
+    if not candidates:
+        return None
+
+    selected = sorted(candidates, key=_last_surfaced_key)[0]
+    await bucket_mgr.update(selected["id"], last_surfaced=now_iso())
+    return selected
 
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
@@ -142,6 +201,8 @@ async def _merge_or_create(
     valence: float,
     arousal: float,
     name: str = "",
+    anchor: bool = False,
+    daily_recall: bool = False,
 ) -> tuple[str, bool]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -170,6 +231,8 @@ async def _merge_or_create(
                     domain=list(set(bucket["metadata"].get("domain", []) + domain)),
                     valence=valence,
                     arousal=arousal,
+                    anchor=anchor or bucket["metadata"].get("anchor", False),
+                    daily_recall=daily_recall or bucket["metadata"].get("daily_recall", False),
                 )
                 return bucket["metadata"].get("name", bucket["id"]), True
             except Exception as e:
@@ -183,6 +246,8 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        anchor=anchor,
+        daily_recall=daily_recall,
     )
     return bucket_id, False
 
@@ -220,10 +285,6 @@ async def breath(
         # --- 当前状态：如果有就加载 ---
         status_text = await bucket_mgr.get_current_status()
 
-        # --- Permanent directory: core pinned entries + grouped archive layer ---
-        # --- 永久目录：核心钉选逐条显示，档案层按标签分组计数 ---
-        core_index, archive_summary = _format_permanent_directory(all_buckets)
-
         # --- Session summary: find the most recent one ---
         # --- 上次对话摘要：找最近的一条 ---
         session_buckets = [
@@ -235,14 +296,25 @@ async def breath(
         if session_buckets:
             latest = max(session_buckets, key=lambda b: b["metadata"].get("last_active", ""))
             try:
-                session_text = await dehydrator.dehydrate(latest["content"], latest["metadata"])
+                session_text = _extract_summary_line(latest["content"])
                 # Mark old session summaries as resolved so they sink
                 await bucket_mgr.update(latest["id"], resolved=True)
             except Exception as e:
-                logger.warning(f"Failed to dehydrate session summary / 对话摘要脱水失败: {e}")
+                logger.warning(f"Failed to format session summary / 对话摘要格式化失败: {e}")
 
-        # --- Unresolved dynamic buckets: surface top 3 by weight + status relevance ---
-        # --- 未解决的动态桶：按权重 + 近况相关性浮现前 3 条 ---
+        # --- Temperature anchor: independent emotional lane, always one short line ---
+        # --- 温度锚点：独立情感通道，每次固定浮现一句 ---
+        anchor_bucket = None
+        anchor_text = ""
+        try:
+            anchor_bucket = await _surface_oldest_bucket(all_buckets, "anchor")
+            if anchor_bucket:
+                anchor_text = anchor_bucket.get("content", "").strip()
+        except Exception as e:
+            logger.warning(f"Failed to surface anchor / 温度锚点浮现失败: {e}")
+
+        # --- Unresolved dynamic buckets: optional, brief, sorted by weight + status relevance ---
+        # --- 未解决的动态桶：可选短浮现，按权重 + 近况相关性排序 ---
         unresolved = [
             b for b in all_buckets
             if not b["metadata"].get("resolved", False)
@@ -250,6 +322,8 @@ async def breath(
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
             and not b["metadata"].get("session_summary", False)
+            and not b["metadata"].get("anchor", False)
+            and not b["metadata"].get("daily_recall", False)
         ]
 
         status_keywords = decay_engine.extract_status_keywords(status_text)
@@ -266,7 +340,7 @@ async def breath(
             key=_surfacing_score,
             reverse=True,
         )
-        top = scored[:3]
+        top = scored[:2]
         dynamic_results = []
         for b in top:
             try:
@@ -278,32 +352,25 @@ async def breath(
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
 
-        if not status_text and not core_index and not archive_summary and not dynamic_results and not session_text:
+        if not status_text and not anchor_text and not dynamic_results and not session_text:
             return "权重池平静，没有需要处理的记忆。"
 
         parts = []
         primary_lines = [
-            "【近况层】",
-            status_text or "（暂无近况）",
+            "【近况】",
+            _format_status_sms(status_text),
             "",
-            "【上次对话摘要】",
+            "【上次聊了什么】",
             session_text or "（暂无未处理摘要）",
+            "",
+            "【温度锚点】",
+            anchor_text or "（锚点池为空，可用 hold(..., anchor=True) 存一句短锚点）",
         ]
-        parts.append("=== 主要层 ===\n" + "\n".join(primary_lines))
+        parts.append("\n".join(primary_lines))
 
-        secondary_lines = []
-        if core_index:
-            secondary_lines.append("【永久核心】")
-            secondary_lines.extend(core_index)
-        if archive_summary:
-            if secondary_lines:
-                secondary_lines.append("")
-            secondary_lines.append("【永久档案】")
-            secondary_lines.append(archive_summary)
-        if secondary_lines:
-            parts.append("=== 次要索引 ===\n" + "\n".join(secondary_lines))
         if dynamic_results:
-            parts.append("=== 动态浮现（前3条） ===\n" + "\n---\n".join(dynamic_results))
+            parts.append("【顺手想起】\n" + "\n---\n".join(dynamic_results))
+        parts.append("想回忆某件事，告诉我关键词。")
         return "\n\n".join(parts)
 
     # --- With args: search mode / 有参数：检索模式 ---
@@ -400,8 +467,10 @@ async def hold(
     pinned: bool = False,
     feel: str = "",
     status: str = "",
+    anchor: bool = False,
+    daily_recall: bool = False,
 ) -> str:
-    """存储单条记忆。tags逗号分隔,importance 1-10。pinned=True永久钉选。feel=第一人称感受(会附加在桶上)。status=pending_followup标记有后续(不走自动遗忘)。importance>=8自动进入永久层。"""
+    """存储单条记忆。tags逗号分隔,importance 1-10。pinned=True永久钉选。feel=第一人称感受。status=pending_followup标记有后续。anchor=True存温度锚点,daily_recall=True进每日回忆池。importance>=8自动进入永久层。"""
     await decay_engine.ensure_started()
 
     # --- Normalize optional params / 规范化可选参数 ---
@@ -416,6 +485,9 @@ async def hold(
     # Auto-pin for high importance
     if importance >= 8:
         pinned = True
+    if anchor:
+        pinned = True
+        importance = max(importance, 8)
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
     # --- Step 1: auto-tagging / 自动打标 ---
@@ -449,6 +521,8 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            anchor=anchor,
+            daily_recall=daily_recall,
         )
         # Attach feeling if provided
         if feel:
@@ -464,6 +538,8 @@ async def hold(
         valence=valence,
         arousal=arousal,
         name=suggested_name,
+        anchor=anchor,
+        daily_recall=daily_recall,
     )
 
     # Attach feeling if provided (need to find the bucket ID)
@@ -623,9 +699,11 @@ async def trace(
     pinned: int = -1,
     followup_status: str = "",
     append_feel: str = "",
+    anchor: int = -1,
+    daily_recall: int = -1,
     delete: bool = False,
 ) -> str:
-    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,followup_status=pending_followup/expired/空,append_feel追加感受,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,anchor=1/0温度锚点,daily_recall=1/0每日回忆,followup_status=pending_followup/expired/空,append_feel追加感受,delete=True删除。只传需改的,-1或空=不改。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -661,6 +739,13 @@ async def trace(
             updates["importance"] = 10  # pinned → lock importance
     if followup_status:
         updates["followup_status"] = followup_status
+    if anchor in (0, 1):
+        updates["anchor"] = bool(anchor)
+        if anchor == 1:
+            updates["pinned"] = True
+            updates["importance"] = 10
+    if daily_recall in (0, 1):
+        updates["daily_recall"] = bool(daily_recall)
 
     appended_feel = False
     append_feel = (append_feel or "").strip()
@@ -690,8 +775,36 @@ async def trace(
 
 
 # =============================================================
-# Tool 5: update_status — Update her current life status
-# 工具 5：update_status — 更新她的近况
+# Tool 5: daily_recall — A memory for today
+# 工具 5：daily_recall — 那年今日
+# =============================================================
+@mcp.tool()
+async def daily_recall() -> str:
+    """每日回忆。AI每天第一次问候时主动调用；从 daily_recall=True 的桶里轮换返回完整原文。"""
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.error(f"Failed to list buckets for daily recall / 每日回忆列桶失败: {e}")
+        return "今日回忆暂时取不出来。"
+
+    try:
+        bucket = await _surface_oldest_bucket(all_buckets, "daily_recall")
+    except Exception as e:
+        logger.warning(f"Failed to surface daily recall / 每日回忆浮现失败: {e}")
+        bucket = None
+
+    if not bucket:
+        return "【那年今日】\n回忆池还空着。可以用 trace(bucket_id, daily_recall=1) 把完整故事放进来。"
+
+    content = bucket.get("content", "").strip()
+    if not content:
+        content = "（这条回忆没有正文）"
+    return f"【那年今日】\n{content}"
+
+
+# =============================================================
+# Tool 6: update_status — Update her current life status
+# 工具 6：update_status — 更新她的近况
 # =============================================================
 @mcp.tool()
 async def update_status(content: str) -> str:
@@ -706,8 +819,8 @@ async def update_status(content: str) -> str:
 
 
 # =============================================================
-# Tool 5: pulse — Heartbeat, system status + memory listing
-# 工具 5：pulse — 脉搏，系统状态 + 记忆列表
+# Tool 7: pulse — Heartbeat, system status + memory listing
+# 工具 7：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
 @mcp.tool()
 async def pulse(include_archive: bool = False) -> str:

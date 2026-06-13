@@ -111,6 +111,8 @@ class BucketManager:
         protected: bool = False,
         session_summary: bool = False,
         followup_status: str = "",
+        anchor: bool = False,
+        daily_recall: bool = False,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -120,6 +122,8 @@ class BucketManager:
         Importance is locked to 10 for pinned/protected buckets.
         session_summary=True: marks as session summary for window handoff.
         followup_status: "pending_followup" prevents auto-expiry.
+        anchor=True: marks as a short temperature anchor.
+        daily_recall=True: marks as a full-memory daily recall candidate.
         """
         bucket_id = generate_bucket_id()
         bucket_name = sanitize_name(name) if name else bucket_id
@@ -154,6 +158,12 @@ class BucketManager:
             metadata["session_summary"] = True
         if followup_status:
             metadata["followup_status"] = followup_status
+        if anchor:
+            metadata["anchor"] = True
+            metadata["last_surfaced"] = ""
+        if daily_recall:
+            metadata["daily_recall"] = True
+            metadata["last_surfaced"] = metadata.get("last_surfaced", "")
 
         # --- Assemble Markdown file (frontmatter + body) ---
         # --- 组装 Markdown 文件 ---
@@ -263,6 +273,14 @@ class BucketManager:
             post["followup_status"] = kwargs["followup_status"]
         if "session_summary" in kwargs:
             post["session_summary"] = bool(kwargs["session_summary"])
+        if "anchor" in kwargs:
+            post["anchor"] = bool(kwargs["anchor"])
+            post.setdefault("last_surfaced", "")
+        if "daily_recall" in kwargs:
+            post["daily_recall"] = bool(kwargs["daily_recall"])
+            post.setdefault("last_surfaced", "")
+        if "last_surfaced" in kwargs:
+            post["last_surfaced"] = kwargs["last_surfaced"]
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         post["last_active"] = now_iso()
