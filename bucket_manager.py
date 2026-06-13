@@ -275,10 +275,12 @@ class BucketManager:
             post["session_summary"] = bool(kwargs["session_summary"])
         if "anchor" in kwargs:
             post["anchor"] = bool(kwargs["anchor"])
-            post.setdefault("last_surfaced", "")
+            if "last_surfaced" not in post:
+                post["last_surfaced"] = ""
         if "daily_recall" in kwargs:
             post["daily_recall"] = bool(kwargs["daily_recall"])
-            post.setdefault("last_surfaced", "")
+            if "last_surfaced" not in post:
+                post["last_surfaced"] = ""
         if "last_surfaced" in kwargs:
             post["last_surfaced"] = kwargs["last_surfaced"]
 
