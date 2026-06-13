@@ -695,6 +695,7 @@ async def trace(
     arousal: float = -1,
     importance: int = -1,
     tags: str = "",
+    append_tags: str = "",
     resolved: int = -1,
     pinned: int = -1,
     followup_status: str = "",
@@ -703,7 +704,7 @@ async def trace(
     daily_recall: int = -1,
     delete: bool = False,
 ) -> str:
-    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,anchor=1/0温度锚点,daily_recall=1/0每日回忆,followup_status=pending_followup/expired/空,append_feel追加感受,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据。tags=覆盖替换全部标签,append_tags=追加标签并去重。resolved=1沉底/0激活,pinned=1钉选/0取消,anchor=1/0温度锚点,daily_recall=1/0每日回忆,followup_status=pending_followup/expired/空,append_feel追加感受,delete=True删除。想加标签用 append_tags，想重置才用 tags。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -731,6 +732,8 @@ async def trace(
         updates["importance"] = importance
     if tags:
         updates["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+    if append_tags:
+        updates["append_tags"] = [t.strip() for t in append_tags.split(",") if t.strip()]
     if resolved in (0, 1):
         updates["resolved"] = bool(resolved)
     if pinned in (0, 1):
@@ -766,6 +769,14 @@ async def trace(
     if appended_feel:
         changed_parts.append("append_feel=已追加")
     changed = ", ".join(changed_parts)
+    if "tags" in updates:
+        old_tag_count = len(bucket.get("metadata", {}).get("tags", []) or [])
+        new_tag_count = len(updates["tags"])
+        if old_tag_count >= 10 and new_tag_count <= 1:
+            changed += (
+                f" ⚠️ 标签从 {old_tag_count} 个替换为 {new_tag_count} 个；"
+                "如果只是想追加请用 append_tags"
+            )
     if "resolved" in updates:
         if updates["resolved"]:
             changed += " → 已沉底，只在关键词触发时重新浮现"

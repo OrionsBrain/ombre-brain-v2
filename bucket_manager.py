@@ -211,6 +211,8 @@ class BucketManager:
             return None
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
+            file_path = self._find_bucket_file_by_name(bucket_id)
+        if not file_path:
             return None
         return self._load_bucket(file_path)
 
@@ -225,6 +227,8 @@ class BucketManager:
         更新桶的内容或元数据字段。
         """
         file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            file_path = self._find_bucket_file_by_name(bucket_id)
         if not file_path:
             return False
 
@@ -252,7 +256,22 @@ class BucketManager:
                 next_name,
             )
         if "tags" in kwargs:
+            old_count = len(post.get("tags", []) or [])
+            new_count = len(kwargs["tags"] or [])
+            logger.info(
+                f"Replacing tags / 覆盖标签: {bucket_id} "
+                f"old={old_count} new={new_count}"
+            )
             post["tags"] = kwargs["tags"]
+        if "append_tags" in kwargs and kwargs["append_tags"]:
+            existing = post.get("tags", []) or []
+            if isinstance(existing, str):
+                existing = [t.strip() for t in existing.split(",") if t.strip()]
+            incoming = kwargs["append_tags"]
+            if isinstance(incoming, str):
+                incoming = [t.strip() for t in incoming.split(",") if t.strip()]
+            merged = list(dict.fromkeys(list(existing) + list(incoming)))
+            post["tags"] = merged
         if "importance" in kwargs:
             post["importance"] = max(1, min(10, int(kwargs["importance"])))
         if "domain" in kwargs:
@@ -435,6 +454,8 @@ class BucketManager:
         删除指定的记忆桶文件。
         """
         file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            file_path = self._find_bucket_file_by_name(bucket_id)
         if not file_path:
             return False
 
@@ -858,6 +879,32 @@ class BucketManager:
                     # 通过文件名中的 ID 片段精确匹配
                     if bucket_id in fname:
                         return os.path.join(root, fname)
+        return None
+
+    def _find_bucket_file_by_name(self, name: str) -> Optional[str]:
+        """
+        Fallback lookup by metadata name after filename/ID lookup fails.
+        当文件名/ID 找不到时，回退按 metadata.name 精确匹配。
+        """
+        if not name:
+            return None
+        target = str(name).strip()
+        if not target:
+            return None
+        for dir_path in [self.permanent_dir, self.dynamic_dir, self.archive_dir]:
+            if not os.path.exists(dir_path):
+                continue
+            for root, _, files in os.walk(dir_path):
+                for fname in files:
+                    if not fname.endswith(".md"):
+                        continue
+                    file_path = os.path.join(root, fname)
+                    try:
+                        post = frontmatter.load(file_path)
+                    except Exception:
+                        continue
+                    if str(post.get("name", "")).strip() == target:
+                        return file_path
         return None
 
     # ---------------------------------------------------------
