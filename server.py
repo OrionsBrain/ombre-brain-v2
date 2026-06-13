@@ -36,6 +36,7 @@ import random
 import logging
 import asyncio
 import httpx
+from collections import Counter
 from typing import Optional
 
 # --- Ensure same-directory modules can be imported ---
@@ -58,6 +59,44 @@ logger = logging.getLogger("ombre_brain")
 bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶管理器
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
+
+
+def _format_permanent_directory(buckets: list[dict]) -> tuple[list[str], str]:
+    """
+    Split permanent index into core pinned entries and grouped archive counts.
+    将永久目录拆成核心钉选条目 + 档案层分组计数。
+    """
+    core_index = []
+    archive_groups = Counter()
+
+    for bucket in buckets:
+        meta = bucket.get("metadata", {})
+        is_permanent = meta.get("type") == "permanent"
+        is_core = meta.get("pinned", False)
+        if not (is_permanent or is_core):
+            continue
+
+        if is_core:
+            name = meta.get("name", bucket.get("id", "未命名"))
+            keywords = ",".join(meta.get("tags", [])[:5])
+            core_index.append(f"📌 {name} [{keywords}]")
+            continue
+
+        tags = [t for t in meta.get("tags", []) if isinstance(t, str) and t.strip()]
+        domains = [d for d in meta.get("domain", []) if isinstance(d, str) and d.strip()]
+        group_name = tags[0].strip() if tags else (domains[0].strip() if domains else "未分类")
+        archive_groups[group_name] += 1
+
+    archive_summary = ""
+    if archive_groups:
+        grouped = [
+            f"{name} ({count})"
+            for name, count in sorted(archive_groups.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        archive_summary = "📁 " + " · ".join(grouped) + " — 搜索关键词展开"
+
+    return core_index, archive_summary
+
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -181,19 +220,9 @@ async def breath(
         # --- 当前状态：如果有就加载 ---
         status_text = await bucket_mgr.get_current_status()
 
-        # --- Pinned/permanent buckets: INDEX ONLY (name + keywords) ---
-        # --- 钉选/永久桶：只返回索引目录（名称+关键词），不返回内容 ---
-        pinned_buckets = [
-            b for b in all_buckets
-            if b["metadata"].get("pinned") or b["metadata"].get("protected")
-            or b["metadata"].get("type") == "permanent"
-        ]
-        pinned_index = []
-        for b in pinned_buckets:
-            meta = b.get("metadata", {})
-            name = meta.get("name", b["id"])
-            keywords = ",".join(meta.get("tags", [])[:5])
-            pinned_index.append(f"📌 {name} [{keywords}]")
+        # --- Permanent directory: core pinned entries + grouped archive layer ---
+        # --- 永久目录：核心钉选逐条显示，档案层按标签分组计数 ---
+        core_index, archive_summary = _format_permanent_directory(all_buckets)
 
         # --- Session summary: find the most recent one ---
         # --- 上次对话摘要：找最近的一条 ---
@@ -240,18 +269,32 @@ async def breath(
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
 
-        if not status_text and not pinned_index and not dynamic_results and not session_text:
+        if not status_text and not core_index and not archive_summary and not dynamic_results and not session_text:
             return "权重池平静，没有需要处理的记忆。"
 
         parts = []
-        if status_text:
-            parts.append(f"=== 她的近况 ===\n{status_text}")
-        if session_text:
-            parts.append(f"=== 上次对话 ===\n{session_text}")
-        if pinned_index:
-            parts.append("=== 永久记忆目录 ===\n" + "\n".join(pinned_index))
+        primary_lines = [
+            "【近况层】",
+            status_text or "（暂无近况）",
+            "",
+            "【上次对话摘要】",
+            session_text or "（暂无未处理摘要）",
+        ]
+        parts.append("=== 主要层 ===\n" + "\n".join(primary_lines))
+
+        secondary_lines = []
+        if core_index:
+            secondary_lines.append("【永久核心】")
+            secondary_lines.extend(core_index)
+        if archive_summary:
+            if secondary_lines:
+                secondary_lines.append("")
+            secondary_lines.append("【永久档案】")
+            secondary_lines.append(archive_summary)
+        if secondary_lines:
+            parts.append("=== 次要索引 ===\n" + "\n".join(secondary_lines))
         if dynamic_results:
-            parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
+            parts.append("=== 动态浮现（前3条） ===\n" + "\n---\n".join(dynamic_results))
         return "\n\n".join(parts)
 
     # --- With args: search mode / 有参数：检索模式 ---
