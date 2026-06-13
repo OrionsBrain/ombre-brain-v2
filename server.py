@@ -241,8 +241,8 @@ async def breath(
             except Exception as e:
                 logger.warning(f"Failed to dehydrate session summary / 对话摘要脱水失败: {e}")
 
-        # --- Unresolved dynamic buckets: surface top 3 by weight ---
-        # --- 未解决的动态桶：按权重浮现前 3 条 ---
+        # --- Unresolved dynamic buckets: surface top 3 by weight + status relevance ---
+        # --- 未解决的动态桶：按权重 + 近况相关性浮现前 3 条 ---
         unresolved = [
             b for b in all_buckets
             if not b["metadata"].get("resolved", False)
@@ -252,9 +252,18 @@ async def breath(
             and not b["metadata"].get("session_summary", False)
         ]
 
+        status_keywords = decay_engine.extract_status_keywords(status_text)
+
+        def _surfacing_score(bucket: dict) -> float:
+            meta = bucket.get("metadata", {})
+            return (
+                decay_engine.calculate_score(meta)
+                + decay_engine.calculate_relevance(meta, status_keywords)
+            )
+
         scored = sorted(
             unresolved,
-            key=lambda b: decay_engine.calculate_score(b["metadata"]),
+            key=_surfacing_score,
             reverse=True,
         )
         top = scored[:3]
@@ -263,7 +272,7 @@ async def breath(
             try:
                 summary = await dehydrator.dehydrate(b["content"], b["metadata"])
                 await bucket_mgr.touch(b["id"])
-                score = decay_engine.calculate_score(b["metadata"])
+                score = _surfacing_score(b)
                 dynamic_results.append(f"[权重:{score:.2f}] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
@@ -613,9 +622,10 @@ async def trace(
     resolved: int = -1,
     pinned: int = -1,
     followup_status: str = "",
+    append_feel: str = "",
     delete: bool = False,
 ) -> str:
-    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,followup_status=pending_followup/expired/空,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,followup_status=pending_followup/expired/空,append_feel追加感受,delete=True删除。只传需改的,-1或空=不改。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -652,14 +662,25 @@ async def trace(
     if followup_status:
         updates["followup_status"] = followup_status
 
-    if not updates:
+    appended_feel = False
+    append_feel = (append_feel or "").strip()
+    if append_feel:
+        appended_feel = await bucket_mgr.add_feeling(bucket_id, append_feel)
+        if not appended_feel:
+            return f"追加感受失败: {bucket_id}"
+
+    if not updates and not appended_feel:
         return "没有任何字段需要修改。"
 
-    success = await bucket_mgr.update(bucket_id, **updates)
-    if not success:
-        return f"修改失败: {bucket_id}"
+    if updates:
+        success = await bucket_mgr.update(bucket_id, **updates)
+        if not success:
+            return f"修改失败: {bucket_id}"
 
-    changed = ", ".join(f"{k}={v}" for k, v in updates.items())
+    changed_parts = [f"{k}={v}" for k, v in updates.items()]
+    if appended_feel:
+        changed_parts.append("append_feel=已追加")
+    changed = ", ".join(changed_parts)
     if "resolved" in updates:
         if updates["resolved"]:
             changed += " → 已沉底，只在关键词触发时重新浮现"

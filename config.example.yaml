@@ -58,7 +58,12 @@ decay:
   check_interval_hours: 24        # Check interval (hours) / 衰减检查间隔（小时）
   emotion_weights:
     base: 1.0                     # Base weight / 基础权重
-    arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
+    arousal_boost: 0.5            # Arousal boost coefficient / 唤醒度加成系数
+    urgency_threshold: 0.85       # High-arousal urgency threshold / 高唤醒紧急加成阈值
+    urgency_boost: 1.2            # High-arousal urgency multiplier / 高唤醒紧急加成倍数
+  relevance:
+    match_boost: 6.0              # Breath surfacing boost per status keyword hit / 近况关键词每命中一次加分
+    max_boost: 18.0               # Max relevance boost per bucket / 单桶相关性加分上限
 
 # --- Embedding / 向量化配置 ---
 # Uses embedding API for semantic similarity search

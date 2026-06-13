@@ -22,9 +22,24 @@
 import math
 import asyncio
 import logging
+import re
 from datetime import datetime
 
+try:
+    import jieba
+except ImportError:  # pragma: no cover - deployment requirements include jieba
+    jieba = None
+
 logger = logging.getLogger("ombre_brain.decay")
+
+
+STOPWORDS = {
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "也",
+    "很", "到", "说", "要", "去", "这", "那", "她", "他", "你", "我们",
+    "一个", "一下", "今天", "昨天", "明天", "现在", "正在", "还是",
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "with",
+    "this", "that", "from", "they", "will", "have", "has",
+}
 
 
 class DecayEngine:
@@ -47,7 +62,13 @@ class DecayEngine:
         # --- 情感权重参数（基于连续 arousal 坐标）---
         emotion_cfg = decay_cfg.get("emotion_weights", {})
         self.emotion_base = emotion_cfg.get("base", 1.0)
-        self.arousal_boost = emotion_cfg.get("arousal_boost", 0.8)
+        self.arousal_boost = emotion_cfg.get("arousal_boost", 0.5)
+        self.urgency_threshold = emotion_cfg.get("urgency_threshold", 0.85)
+        self.urgency_boost = emotion_cfg.get("urgency_boost", 1.2)
+
+        relevance_cfg = decay_cfg.get("relevance", {})
+        self.relevance_match_boost = relevance_cfg.get("match_boost", 6.0)
+        self.relevance_max_boost = relevance_cfg.get("max_boost", 18.0)
 
         self.bucket_mgr = bucket_mgr
 
@@ -89,6 +110,76 @@ class DecayEngine:
             # k = ln(3)/5 ≈ 0.2197 so that at day 7 (5 days past day 2) → 0.3
             raw = 0.9 * math.exp(-0.2197 * (days_since - 2.0))
             return max(0.3, raw)
+
+    # ---------------------------------------------------------
+    # Status relevance helpers for breath surfacing
+    # 近况相关性辅助：用于 breath 自动浮现排序
+    # ---------------------------------------------------------
+    @staticmethod
+    def extract_status_keywords(status_text: str) -> set[str]:
+        """
+        Extract lightweight keywords from current_status.md text.
+        从近况文本中提取轻量关键词。
+        """
+        if not status_text:
+            return set()
+
+        normalized = re.sub(r"\[\[([^\]]+)\]\]", r"\1", status_text.lower())
+        try:
+            zh_words = jieba.lcut(normalized) if jieba else []
+        except Exception:
+            zh_words = []
+        if not zh_words:
+            zh_words = re.findall(r"[\u4e00-\u9fff]{2,12}", normalized)
+        en_words = re.findall(r"[a-z][a-z0-9_-]{1,30}", normalized)
+        zh_segments = re.findall(r"[\u4e00-\u9fff]{2,12}", normalized)
+        zh_ngrams = []
+        for segment in zh_segments:
+            max_size = min(4, len(segment))
+            for size in range(2, max_size + 1):
+                zh_ngrams.extend(
+                    segment[index:index + size]
+                    for index in range(0, len(segment) - size + 1)
+                )
+
+        keywords = set()
+        for word in list(zh_words) + zh_ngrams + en_words:
+            word = str(word).strip().lower()
+            if not word or word in STOPWORDS:
+                continue
+            if re.fullmatch(r"\d+", word):
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]", word):
+                continue
+            if len(word) < 2:
+                continue
+            keywords.add(word)
+        return keywords
+
+    def calculate_relevance(self, metadata: dict, status_keywords: set[str]) -> float:
+        """
+        Score literal overlap between bucket tags/keywords and current status.
+        计算桶 tags/keywords 与近况关键词的字面交集相关性。
+        """
+        if not isinstance(metadata, dict) or not status_keywords:
+            return 0.0
+
+        candidates = []
+        for field in ("tags", "keywords"):
+            value = metadata.get(field, [])
+            if isinstance(value, str):
+                candidates.extend([v.strip() for v in value.split(",")])
+            elif isinstance(value, list):
+                candidates.extend(value)
+
+        bucket_keywords = {
+            str(item).strip().lower()
+            for item in candidates
+            if isinstance(item, str) and len(item.strip()) >= 2
+        }
+        hits = bucket_keywords & status_keywords
+        relevance = len(hits) * self.relevance_match_boost
+        return min(self.relevance_max_boost, relevance)
 
     def calculate_score(self, metadata: dict) -> float:
         """
@@ -154,7 +245,11 @@ class DecayEngine:
         resolved_factor = 0.05 if metadata.get("resolved", False) else 1.0
         # High-arousal unresolved buckets get urgency boost for priority surfacing
         # 高唤醒未解决桶额外加成，优先浮现
-        urgency_boost = 1.5 if (arousal > 0.7 and not metadata.get("resolved", False)) else 1.0
+        urgency_boost = (
+            self.urgency_boost
+            if (arousal > self.urgency_threshold and not metadata.get("resolved", False))
+            else 1.0
+        )
 
         return round(score * resolved_factor * urgency_boost, 4)
 

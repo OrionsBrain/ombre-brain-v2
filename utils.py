@@ -46,7 +46,13 @@ def load_config(config_path: str = None) -> dict:
             "check_interval_hours": 24,
             "emotion_weights": {
                 "base": 1.0,
-                "arousal_boost": 0.8,
+                "arousal_boost": 0.5,
+                "urgency_threshold": 0.85,
+                "urgency_boost": 1.2,
+            },
+            "relevance": {
+                "match_boost": 6.0,
+                "max_boost": 18.0,
             },
         },
         "matching": {
