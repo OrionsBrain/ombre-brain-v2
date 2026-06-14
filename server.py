@@ -1068,8 +1068,11 @@ async def trace(
 # 工具 5：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
 @mcp.tool()
-async def pulse(include_archive: bool = False) -> str:
-    """系统状态+记忆桶列表。include_archive=True含归档。"""
+async def pulse(include_archive: bool = False, limit: int = 20, offset: int = 0) -> str:
+    """系统状态+记忆桶列表（按权重降序分页）。
+    limit=每页条数（默认20；limit=0 返回全部，可能很长）。
+    offset=起始偏移（0-based）：pulse()看第1页，pulse(offset=20)看第21-40条。
+    include_archive=True含归档。"""
     try:
         stats = await bucket_mgr.get_stats()
     except Exception as e:
@@ -1093,9 +1096,43 @@ async def pulse(include_archive: bool = False) -> str:
     if not buckets:
         return status + "\n记忆库为空。"
 
-    lines = []
+    # --- Score every bucket, sort by decay weight desc / 计算权重并按权重降序 ---
+    # The full listing is unranked storage order otherwise; ranking makes a
+    # bounded page (top-N by weight) actually meaningful.
+    # 否则全量列表是存储顺序；按权重排序后，分页的 top-N 才有意义。
+    scored = []
     for b in buckets:
         meta = b.get("metadata", {})
+        try:
+            score = decay_engine.calculate_score(meta)
+        except Exception:
+            score = 0.0
+        scored.append((score, b, meta))
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    total = len(scored)
+
+    # --- Clamp pagination params / 规整分页参数 ---
+    if limit < 0:
+        limit = 0
+    if offset < 0:
+        offset = 0
+
+    # limit == 0 means "return everything" (opt-in full dump; may be very long)
+    # limit=0 表示返回全部（显式选择的全量导出，可能非常长）
+    if limit == 0:
+        page = scored[offset:]
+        page_note = f"全部 {total} 条，按权重降序"
+    else:
+        page = scored[offset:offset + limit]
+        end = min(offset + limit, total)
+        if page:
+            page_note = f"第 {offset + 1}-{end} 条 / 共 {total} 条，按权重降序"
+        else:
+            page_note = f"偏移 {offset} 超出范围（共 {total} 条）"
+
+    lines = []
+    for score, b, meta in page:
         if meta.get("pinned") or meta.get("protected"):
             icon = "📌"
         elif meta.get("type") == "permanent":
@@ -1108,10 +1145,6 @@ async def pulse(include_archive: bool = False) -> str:
             icon = "✅"
         else:
             icon = "💭"
-        try:
-            score = decay_engine.calculate_score(meta)
-        except Exception:
-            score = 0.0
         domains = ",".join(meta.get("domain", []))
         val = meta.get("valence", 0.5)
         aro = meta.get("arousal", 0.3)
@@ -1126,7 +1159,18 @@ async def pulse(include_archive: bool = False) -> str:
             f"标签:{','.join(meta.get('tags', []))}"
         )
 
-    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
+    # --- Pagination nav hints / 翻页提示 ---
+    nav = []
+    if limit > 0 and offset + limit < total:
+        nav.append(f"下一页 pulse(offset={offset + limit})")
+    if offset > 0:
+        nav.append(f"上一页 pulse(offset={max(0, offset - limit) if limit > 0 else 0})")
+    if limit > 0 and total > limit:
+        nav.append("全部 pulse(limit=0)")
+    nav_line = ("\n--- " + " | ".join(nav) + " ---") if nav else ""
+
+    body = "\n".join(lines) if lines else "（本页无内容）"
+    return status + f"\n=== 记忆列表（{page_note}）===\n" + body + nav_line
 
 
 # =============================================================

@@ -33,9 +33,10 @@ class EmbeddingEngine:
         embed_cfg = config.get("embedding", {})
 
         self.api_key = (embed_cfg.get("api_key") or dehy_cfg.get("api_key") or "").strip()
+        # base_url does NOT fall back to dehydration: the default embedding model
+        # is Gemini-only, so inheriting a non-Gemini dehydration URL would 401.
         self.base_url = (
             (embed_cfg.get("base_url") or "").strip()
-            or (dehy_cfg.get("base_url") or "").strip()
             or "https://generativelanguage.googleapis.com/v1beta/openai/"
         )
         self.model = embed_cfg.get("model", "gemini-embedding-001")
