@@ -15,6 +15,8 @@
 | `OMBRE_MODEL` | 否 | — | `OMBRE_DEHYDRATION_MODEL` 的别名（前者优先） |
 | `OMBRE_EMBEDDING_MODEL` | 否 | `gemini-embedding-001` | 向量嵌入模型名（覆盖 `embedding.model`） |
 | `OMBRE_EMBEDDING_BASE_URL` | 否 | — | 向量嵌入的 API Base URL（覆盖 `embedding.base_url`；留空则复用脱水配置） |
+| `OMBRE_API_TOKEN` | 否 | — | `/mcp` 与 REST `/api/*` 的鉴权 token（`mcp_auth.py` 用）；客户端用 `Authorization: Bearer <token>` |
+| `MCP_PUBLIC_PATH_SECRET` | 否 | — | 公开秘密路径：设后可用 `https://<域名>/<secret>/mcp` 免鉴权连 `/mcp`（给官方 Claude Chat 连接器，免 OAuth）。留空则关闭。详见 `mcp_auth.py` 顶部注释 |
 
 ## 说明
 

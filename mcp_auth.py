@@ -30,6 +30,14 @@ from server import mcp, _verify_any_password
 
 OMBRE_API_TOKEN = os.environ.get("OMBRE_API_TOKEN", "").strip()
 
+# 公开秘密路径（给官方 Claude Chat 连接器用）：把 /mcp 额外挂在一个带秘密前缀的路径上，
+# 该路径不鉴权、直接放行（中间件改写回 /mcp）。Claude 连这个 URL 就像连一个开放 MCP，
+# 不触发 OAuth。安全性 = 这串 secret 的保密性（和 token 等价），勿外泄。
+# 在 Zeabur 服务环境变量里设 MCP_PUBLIC_PATH_SECRET=<一长串随机>，连接器 URL 即：
+#   https://<你的域名>/<MCP_PUBLIC_PATH_SECRET>/mcp
+# 留空则关闭此功能（只剩 token 鉴权的 /mcp，app/bot 照常用）。
+MCP_PUBLIC_SECRET = os.environ.get("MCP_PUBLIC_PATH_SECRET", "").strip()
+
 # Paths that carry the raw MCP transport and must require a token.
 # Everything else (/, /health, /auth/*, /dashboard, /api/*) keeps its own
 # auth (or is intentionally public) and is left untouched.
@@ -51,6 +59,15 @@ def _token_ok(token: str) -> bool:
 class MCPAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
+        # 公开秘密路径：/<secret>/mcp[...] → 改写成 /mcp[...] 并免鉴权放行（Claude Chat 连接器）。
+        # 仅当 path 精确带正确 secret 前缀时生效；无 secret 的人访问普通 /mcp 仍需 token。
+        if MCP_PUBLIC_SECRET:
+            prefix = "/" + MCP_PUBLIC_SECRET
+            if path == prefix + "/mcp" or path.startswith(prefix + "/mcp/"):
+                new_path = path[len(prefix):]
+                request.scope["path"] = new_path
+                request.scope["raw_path"] = new_path.encode("utf-8")
+                return await call_next(request)
         protected = any(
             path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES
         )
