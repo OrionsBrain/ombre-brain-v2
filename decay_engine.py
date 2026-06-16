@@ -11,7 +11,7 @@
 #
 # Emotion weight (continuous coordinate, not discrete labels):
 # 情感权重（基于连续坐标而非离散列举）：
-#   emotion_weight = base + (arousal × arousal_boost)
+#   emotion_weight = base + (arousal * arousal_boost) + (abs(valence - 0.5) * valence_boost)
 #   Higher arousal → higher emotion weight → slower decay
 #   唤醒度越高 → 情感权重越大 → 记忆衰减越慢
 #
@@ -48,6 +48,7 @@ class DecayEngine:
         emotion_cfg = decay_cfg.get("emotion_weights", {})
         self.emotion_base = emotion_cfg.get("base", 1.0)
         self.arousal_boost = emotion_cfg.get("arousal_boost", 0.8)
+        self.valence_boost = emotion_cfg.get("valence_boost", 0.3)
 
         self.bucket_mgr = bucket_mgr
 
@@ -127,7 +128,11 @@ class DecayEngine:
             arousal = max(0.0, min(1.0, float(metadata.get("arousal", 0.3))))
         except (ValueError, TypeError):
             arousal = 0.3
-        emotion_weight = self.emotion_base + arousal * self.arousal_boost
+        try:
+            valence = max(0.0, min(1.0, float(metadata.get("valence", 0.5))))
+        except (ValueError, TypeError):
+            valence = 0.5
+        emotion_weight = self.emotion_base + arousal * self.arousal_boost + abs(valence - 0.5) * self.valence_boost
 
         # --- Time weight ---
         time_weight = self._calc_time_weight(days_since)
