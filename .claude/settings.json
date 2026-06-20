@@ -1,27 +1,11 @@
 {
   "hooks": {
-    "SessionStart": [
+    "UserPromptSubmit": [
       {
-        "matcher": "startup",
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_breath.py\"",
-            "shell": "/bin/bash",
-            "timeout": 12,
-            "statusMessage": "Ombre Brain 正在浮现记忆..."
-          }
-        ]
-      },
-      {
-        "matcher": "resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_breath.py\"",
-            "shell": "/bin/bash",
-            "timeout": 12,
-            "statusMessage": "Ombre Brain 正在浮现记忆..."
+            "command": "t=$(TZ=Asia/Shanghai date '+%m.%d  %H:%M'); echo \"{\\\"systemMessage\\\": \\\"$t\\\", \\\"hookSpecificOutput\\\": {\\\"hookEventName\\\": \\\"UserPromptSubmit\\\", \\\"additionalContext\\\": \\\"Current Beijing time: $t\\\"}}\""
           }
         ]
       }
