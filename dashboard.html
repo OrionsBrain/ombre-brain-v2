@@ -1143,7 +1143,7 @@ function renderBuckets(buckets) {
     var icon = b.pinned ? '📌' : b.type === 'feel' ? '🫧' : b.digested ? '🌿' : b.resolved ? '💤' : '💭';
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
-    var timeAgo = formatTimeAgo(b.last_active || b.created);
+    var timeAgo = formatTimeAgo(b.created || b.last_active);
     return '<div class="bucket-row" onclick="showDetail(\'' + b.id + '\')">' +
       '<span class="icon">' + icon + '</span>' +
       '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
