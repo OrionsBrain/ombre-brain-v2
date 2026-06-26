@@ -776,7 +776,7 @@ def _check_desire_secret(request: Request) -> bool:
 @mcp.custom_route("/api/desire/recall", methods=["POST"])
 async def api_desire_recall(request: Request) -> Response:
     """Orion 的 recall：捞高 arousal 的真事桶，给 solo/recall 当意识流锚点。
-    Body(JSON，全可选): {query?: str, arousal_min?: float=0.85, limit?: int=2}
+    Body(JSON，全可选): {query?: str, arousal_min?: float=0.85, valence_min?: float=0.6, limit?: int=2}
     Auth: 请求头 X-Ombre-Secret == 环境变量 OMBRE_DESIRE_TOKEN。
     纯只读：只 list + 过滤，绝不写。"""
     from starlette.responses import JSONResponse
@@ -794,6 +794,10 @@ async def api_desire_recall(request: Request) -> Response:
         limit = max(1, min(int(body.get("limit", 2)), 10))
     except (TypeError, ValueError):
         limit = 2
+    try:
+        valence_min = float(body.get("valence_min", 0.6))
+    except (TypeError, ValueError):
+        valence_min = 0.6
     query = (body.get("query") or "").strip().lower()
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=True)
@@ -804,9 +808,11 @@ async def api_desire_recall(request: Request) -> Response:
         meta = b.get("metadata", {}) or {}
         try:
             ar = float(meta.get("arousal", 0.0))
+            va = float(meta.get("valence", 0.5))
         except (TypeError, ValueError):
-            ar = 0.0
-        if ar >= arousal_min:
+            ar, va = 0.0, 0.5
+        # solo/recall 要"高激动 + 偏正面"(亲密的)，不要"高激动的痛"(创伤)
+        if ar >= arousal_min and va >= valence_min:
             hot.append((ar, b))
     if query:
         filtered = [
