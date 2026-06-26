@@ -760,6 +760,78 @@ async def health_check(request: Request) -> Response:
 
 
 # =============================================================
+# /api/desire/* —— Orion 私有：给 desire daemon 的程序化只读口
+# 2026-06-26 加。非 Ombre 上游功能，靠边、不搅上游逻辑；纯只读，不写任何东西。
+# 鉴权：请求头 X-Ombre-Secret 必须 == 环境变量 OMBRE_DESIRE_TOKEN（hmac 定时比较）。
+# 未设该环境变量时一律 401 —— 失败也锁死。
+# =============================================================
+def _check_desire_secret(request: Request) -> bool:
+    expected = (os.environ.get("OMBRE_DESIRE_TOKEN", "") or "").strip()
+    if not expected:
+        return False
+    got = (request.headers.get("x-ombre-secret") or "").strip()
+    return bool(got) and hmac.compare_digest(got, expected)
+
+
+@mcp.custom_route("/api/desire/recall", methods=["POST"])
+async def api_desire_recall(request: Request) -> Response:
+    """Orion 的 recall：捞高 arousal 的真事桶，给 solo/recall 当意识流锚点。
+    Body(JSON，全可选): {query?: str, arousal_min?: float=0.85, limit?: int=2}
+    Auth: 请求头 X-Ombre-Secret == 环境变量 OMBRE_DESIRE_TOKEN。
+    纯只读：只 list + 过滤，绝不写。"""
+    from starlette.responses import JSONResponse
+    if not _check_desire_secret(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        arousal_min = float(body.get("arousal_min", 0.85))
+    except (TypeError, ValueError):
+        arousal_min = 0.85
+    try:
+        limit = max(1, min(int(body.get("limit", 2)), 10))
+    except (TypeError, ValueError):
+        limit = 2
+    query = (body.get("query") or "").strip().lower()
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    hot = []
+    for b in all_buckets:
+        meta = b.get("metadata", {}) or {}
+        try:
+            ar = float(meta.get("arousal", 0.0))
+        except (TypeError, ValueError):
+            ar = 0.0
+        if ar >= arousal_min:
+            hot.append((ar, b))
+    if query:
+        filtered = [
+            (ar, b) for ar, b in hot
+            if query in (b.get("content", "") or "").lower()
+            or query in ((b.get("metadata", {}) or {}).get("name", "") or "").lower()
+        ]
+        if filtered:
+            hot = filtered
+    hot.sort(key=lambda t: t[0], reverse=True)
+    memories = []
+    for ar, b in hot[:limit]:
+        meta = b.get("metadata", {}) or {}
+        preview = strip_wikilinks(b.get("content", "") or "")[:200]
+        memories.append({
+            "id": b.get("id", ""),
+            "name": meta.get("name", ""),
+            "valence": meta.get("valence"),
+            "arousal": meta.get("arousal"),
+            "preview": preview,
+        })
+    return JSONResponse({"ok": True, "count": len(memories), "memories": memories})
+
+
+# =============================================================
 # /api/heartbeat — 轻量心跳（iter 1.6 §3）
 # 仅返回 {alive, ts, uptime_s, last_op_ts}，前端右上角心跳灯轮询。
 # =============================================================
