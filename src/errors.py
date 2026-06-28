@@ -333,7 +333,7 @@ def clear_errors_log() -> int:
         with _errors_path_lock:
             with open(_errors_path, "r", encoding="utf-8") as f:
                 n = sum(1 for _ in f)
-            open(_errors_path, "w").close()
+            open(_errors_path, "w", encoding="utf-8").close()
         return n
     except Exception as e:
         logger.warning(f"[errors] clear failed: {e}")

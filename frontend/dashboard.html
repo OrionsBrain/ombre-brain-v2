@@ -33,7 +33,7 @@
     --accent: #C2982F;                /* 暖金（高亮/激活态） */
     --accent-light: #D7B14A;
     --accent-glow: rgba(194, 152, 47, 0.22);
-    --positive: #7EAD68;
+    --positive: #87A987;
     --negative: #BE5A41;              /* 删除/危险红 */
     --warning: #B89762;
     /* 拟物化双向光影：高光（左上）+ 阴影（右下）。原作者把高光设成透明=关闭了立体感，这里点亮。 */
@@ -1262,6 +1262,13 @@
   #ob-chick:hover .chick-tip { opacity:1; transform: translateY(0); }
   @media (max-width: 768px) { #ob-chick { width: 38px; height: 38px; right: 12px; bottom: 12px; } }
 
+  /* —— ⑨b 小鸡的一天：随时段给画布微调色温（纯装饰，best-effort）—— */
+  #ob-chick canvas { transition: filter .8s ease; }
+  #ob-chick.tod-dawn  canvas { filter: hue-rotate(-8deg) brightness(1.05) saturate(1.05); }
+  #ob-chick.tod-day   canvas { filter: brightness(1.08) saturate(1.10); }
+  #ob-chick.tod-dusk  canvas { filter: hue-rotate(-14deg) brightness(0.99) saturate(1.18); }
+  #ob-chick.tod-night canvas { filter: brightness(0.80) saturate(0.78) hue-rotate(10deg); }
+
   /* ==================== Easter Eggs ==================== */
   #egg-overlay {
     display:none; position:fixed; inset:0; z-index:9999;
@@ -2170,9 +2177,10 @@
       <h3>① 我</h3>
 
       <div style="margin-bottom:18px;">
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">系统通知称呼</div>
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">称呼 / 昵称</div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
-          系统向 Claude 发送通知时用的称呼（如你的名字或昵称）。留空 = 默认「人类」。
+          系统通知 + 记忆里对你的称呼（如你的名字或昵称）。留空 = 默认「人类」。<br>
+          保存时会把已有记忆里的旧称呼一并换成新名（标题 / 正文 / 备注），新旧不再并存。
         </div>
         <div class="config-row">
           <label>称呼</label>
@@ -2181,6 +2189,14 @@
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
           <button class="btn-primary" onclick="saveHumanName()" title="保存" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存</button>
           <span id="settings-human-msg" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 6px;line-height:1.6;">
+          已经改过名、但旧记忆里仍残留旧称呼（如「用户」）？在这里填旧词，一键替换为当前称呼：
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="settings-human-from" placeholder="用户" maxlength="20" style="width:120px;" />
+          <button onclick="syncExistingHuman()" title="替换旧记忆" style="font-size:12px;padding:0 12px;height:32px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="replace"></i> 替换旧记忆</button>
+          <span id="settings-human-sync-msg" style="font-size:12px;color:var(--text-dim);"></span>
         </div>
       </div>
 
@@ -2279,6 +2295,18 @@
         <button onclick="loadSettingsStatus()" title="刷新" style="margin-top:8px;font-size:12px;padding:0 12px;height:32px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw"></i> 刷新</button>
       </div>
 
+      <div style="margin-bottom:18px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">修复钉选计数</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
+          若「永久桶计数」明显大于面板里实际的钉选数（取消钉选后计数不减、钉新桶老报上限），
+          点这里清理残留的孤儿固化桶：把它们降级回动态桶，释放配额、解开权重卡死。安全幂等，可重复点。
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button onclick="fixPinnedDesync()" title="检查并修复" style="font-size:12px;padding:0 12px;height:32px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="wrench"></i> 检查并修复</button>
+          <span id="fix-pinned-msg" style="font-size:12px;"></span>
+        </div>
+      </div>
+
       <div>
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">宿主机记忆桶目录 (Docker)</div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
@@ -2303,6 +2331,18 @@
 
       <div style="margin-bottom:18px;">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">脱水 / 打标 LLM</div>
+        <div class="config-row" style="align-items:center;">
+          <label>服务商预设</label>
+          <select id="dehy-preset" onchange="applyDehyPreset()" style="flex:1;">
+            <option value="">— 选一下自动填好 URL + 模型名 —</option>
+            <option value="deepseek">DeepSeek（deepseek-chat）</option>
+            <option value="gemini">Gemini（gemini-2.5-flash-lite）</option>
+            <option value="siliconflow">硅基流动 SiliconFlow（DeepSeek-V3，免费额度）</option>
+            <option value="anthropic">Anthropic（claude-3-5-haiku）</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+        <div id="dehy-preset-hint" style="margin-top:-4px;margin-bottom:10px;padding-left:122px;font-size:11px;color:var(--text-light);line-height:1.6;">先选服务商，会自动填好 Base URL 和正确的模型名。</div>
         <div id="dehy-key-notice" style="display:none;font-size:12px;color:var(--warning);margin-bottom:10px;padding:7px 10px;background:rgba(184,153,98,0.08);border-radius:4px;line-height:1.6;">
           <svg class="icon icon-warn" aria-hidden="true"><use href="#i-warn"></use></svg> 压缩 API Key 未配置，桶内容将无法被自动脱水压缩，记忆系统无法正常运行。请在下方输入框填入 Key 并点击「保存 Key」。
         </div>
@@ -2335,6 +2375,24 @@
 
       <div>
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">向量化 Embedding</div>
+        <div class="config-row" style="align-items:center;">
+          <label>服务商预设</label>
+          <select id="emb-preset" onchange="applyEmbedPreset()" style="flex:1;">
+            <option value="">— 选一下自动填好 URL + 模型名 —</option>
+            <option value="gemini">Gemini 云端（gemini-embedding-001）</option>
+            <option value="siliconflow">硅基流动 SiliconFlow（BAAI/bge-m3，免费）</option>
+            <option value="ollama">本地 Ollama（bge-m3，无需 key、不出网）</option>
+            <option value="custom">自定义 OpenAI 兼容</option>
+          </select>
+        </div>
+        <div id="emb-preset-hint" style="margin-top:-4px;margin-bottom:10px;padding-left:122px;font-size:11px;color:var(--text-light);line-height:1.6;">先选服务商，会自动填好 Base URL 和正确的模型名（省得填错 model 名报 400）。</div>
+        <div style="margin:0 0 12px;padding:9px 12px;background:rgba(184,153,98,0.08);border-radius:6px;font-size:11px;color:var(--text-light);line-height:1.8;">
+          <b style="color:var(--text-dim);">怎么选（按服务器所在地区）</b><br>
+          · <b>美国 / 海外服务器</b>：建议用 Gemini 云端，就近低延迟。<br>
+          · <b>中国大陆服务器</b>：建议用硅基流动 SiliconFlow，国内域名直连快。<br>
+          · <b>最优、最稳</b>：本地 Ollama bge-m3，离线不出网、无跨境延迟、不耗 key 额度。<br>
+          · 跨区域用（如美国机连国内 API）务必给服务器挂梯子 / 代理，否则易超时或报 400。
+        </div>
         <div id="emb-key-notice" style="display:none;font-size:12px;color:var(--warning);margin-bottom:10px;padding:7px 10px;background:rgba(184,153,98,0.08);border-radius:4px;line-height:1.6;">
           <svg class="icon icon-warn" aria-hidden="true"><use href="#i-warn"></use></svg> Ombre Brain 必须配置向量化 Embedding API Key 才能正常使用。未配置时语义检索完全不可用，记忆系统无法运作。请在下方填入 Key 并点击「保存 Key」，保存后立即生效。
         </div>
@@ -2347,6 +2405,7 @@
           <label>API Key</label>
           <input type="password" id="cfg-emb-api-key" placeholder="当前: 加载中…" style="flex:1;" />
           <button type="button" onclick="saveEmbedKey()" title="保存 Key" style="margin-left:8px;padding:0 10px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="key"></i> 保存</button>
+          <button type="button" onclick="testEmbeddingKey()" title="测试向量化连接" style="margin-left:4px;padding:0 10px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="zap"></i> 测试</button>
           <span id="emb-key-msg" style="margin-left:8px;font-size:11px;"></span>
         </div>
         <div class="config-row">
@@ -2385,6 +2444,14 @@
           </div>
           <button id="emb-migrate-btn" type="button" style="padding:6px 12px;">切换 / 重算所有 embedding…</button>
           <div id="emb-migrate-status" style="margin-top:8px;font-size:12px;line-height:1.6;color:var(--text);"></div>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border,#ddd);">
+            <div style="font-size:12px;color:var(--text-light);margin-bottom:6px;">
+              只给「文件在、向量缺」的桶补一发（不动已有向量、不重算全库，省额度）。
+              老的 permanent / 钉选桶若搜不到，多半是缺向量，点这个补齐。
+            </div>
+            <button id="emb-backfill-btn" type="button" onclick="startBackfill()" style="padding:6px 12px;display:inline-flex;align-items:center;gap:6px;"><svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg> 补齐缺失向量</button>
+            <div id="emb-backfill-status" style="margin-top:8px;font-size:12px;line-height:1.6;color:var(--text);"></div>
+          </div>
         </div>
 
         <!-- 本地向量模型 (Ollama / bge-m3) -->
@@ -2393,19 +2460,33 @@
           <div style="font-size:11px;color:var(--text-light);line-height:1.6;margin-bottom:8px;">
             <svg class="icon" aria-hidden="true"><use href="#i-chip"></use></svg> 需约 <b>2–3GB 空闲内存</b>（模型常驻）+ 1.2GB 磁盘；纯 CPU 即可，首条查询约 1–9s（冷启动），之后 &lt;0.5s。低配机器（&lt;2GB 空闲内存）建议继续用云端向量化。
           </div>
+          <div id="local-emb-env" style="font-size:11px;color:var(--text-light);margin-bottom:6px;"></div>
           <div id="local-emb-status" style="font-size:12px;line-height:1.7;color:var(--text);margin-bottom:8px;">读取中…</div>
 
+          <div class="config-row" style="align-items:center;margin-bottom:8px;">
+            <label style="min-width:auto;">运行时镜像</label>
+            <select id="local-emb-binmirror" style="width:auto;">
+              <option value="official">官方源 ollama.com（默认）</option>
+              <option value="github">GitHub Releases</option>
+            </select>
+            <input type="text" id="local-emb-binmirror-custom" placeholder="或自定义前缀 URL（如 https://mymirror/ollama）" style="flex:1;margin-left:8px;" />
+          </div>
+
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <button type="button" class="btn-primary" onclick="oneClickLocal()" style="padding:7px 14px;display:inline-flex;align-items:center;gap:6px;"><svg class="icon" aria-hidden="true"><use href="#i-rocket"></use></svg> 一键搭建本地向量化（下载 + 切换）</button>
+            <button type="button" class="btn-primary" onclick="oneClickLocal()" style="padding:7px 14px;display:inline-flex;align-items:center;gap:6px;"><svg class="icon" aria-hidden="true"><use href="#i-rocket"></use></svg> 一键本地化（装 + 起 + 下模型 + 切换）</button>
             <button type="button" onclick="switchEmbedding('gemini')" title="切回云端" style="padding:7px 10px;"><i data-lucide="cloud"></i></button>
             <button type="button" onclick="loadLocalEmbStatus()" title="刷新状态" style="padding:7px 10px;"><i data-lucide="refresh-cw"></i></button>
           </div>
 
           <details style="margin-bottom:6px;">
-            <summary style="cursor:pointer;font-size:12px;color:var(--text-light);">分步操作 / 高级（下载镜像、单独下载或切换）</summary>
+            <summary style="cursor:pointer;font-size:12px;color:var(--text-light);">分步操作 / 高级（逐步：装运行时 → 启动 → 下模型 → 切换）</summary>
             <div style="padding-top:8px;">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <button type="button" onclick="installOllama()" title="按当前系统免提权安装 ollama 运行时" style="padding:6px 10px;"><i data-lucide="download-cloud"></i> 1·安装运行时</button>
+                <button type="button" onclick="startOllama()" title="把 ollama 作为 OB 子进程启动" style="padding:6px 10px;"><i data-lucide="play"></i> 2·启动</button>
+              </div>
               <div class="config-row" style="align-items:center;">
-                <label style="min-width:auto;">下载镜像</label>
+                <label style="min-width:auto;">模型镜像</label>
                 <select id="local-emb-mirror" style="width:auto;">
                   <option value="official">官方源（默认）</option>
                   <option value="modelscope">ModelScope（国内，需匹配模型名）</option>
@@ -2413,12 +2494,13 @@
                 <input type="text" id="local-emb-mirror-custom" placeholder="或自定义 registry 前缀，如 myhub.com/lib/" style="flex:1;margin-left:8px;" />
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-                <button type="button" onclick="pullLocalModel()" title="仅下载 bge-m3" style="padding:6px 10px;"><i data-lucide="download"></i> bge-m3</button>
-                <button type="button" onclick="switchEmbedding('ollama')" title="切换到本地并重算" style="padding:6px 10px;"><i data-lucide="cpu"></i> 切本地</button>
+                <button type="button" onclick="pullLocalModel()" title="仅下载 bge-m3" style="padding:6px 10px;"><i data-lucide="download"></i> 3·下载 bge-m3</button>
+                <button type="button" onclick="switchEmbedding('ollama')" title="切换到本地并重算" style="padding:6px 10px;"><i data-lucide="cpu"></i> 4·切本地</button>
               </div>
             </div>
           </details>
 
+          <div id="local-emb-install-status" style="margin-top:8px;font-size:12px;line-height:1.6;color:var(--text);"></div>
           <div id="local-emb-pull-status" style="margin-top:8px;font-size:12px;line-height:1.6;color:var(--text);"></div>
           <div id="local-emb-hint" style="margin-top:8px;font-size:11px;color:var(--text-light);line-height:1.6;"></div>
         </div>
@@ -2482,9 +2564,14 @@
     <div class="config-section" id="sec-env">
       <h3>⑤ 环境变量</h3>
       <p style="font-size:12px;color:var(--text-light);margin:0 0 16px;line-height:1.6;">
-        这里改完保存会立即生效并写入 <code>.env</code>（重启后仍有效）。<br>
+        这里改完保存会立即生效并写入 <code>config.yaml</code>（重启后仍有效）。<br>
         API Key 字段显示脱敏值；输入新值才会覆盖，留空 = 不动。
       </p>
+      <!-- 平台环境变量冲突告警：当 OMBRE_* 由平台（如 Zeabur）env 注入时，
+           它优先级高于 config.yaml，重启会覆盖这里保存的值。由 refreshEnvConfig 填充。 -->
+      <div id="env-shadow-warning" style="display:none;background:rgba(200,80,60,0.10);
+        border:1px solid var(--negative);border-radius:8px;padding:10px 12px;margin:0 0 16px;
+        font-size:12px;line-height:1.7;color:var(--negative);"></div>
 
       <div style="margin-bottom:18px;">
         <div style="font-size:13px;font-weight:600;margin-bottom:8px;">压缩 LLM（脱水 / 打标 / 合并）</div>
@@ -2555,7 +2642,7 @@
     <div class="config-section" id="sec-mcp">
       <h3>⑥ MCP 配置</h3>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
-        生成 Claude Desktop / claude.ai 的 MCP 连接配置。本服务拆成两个端点（主 + 副），对应 claude.ai 5 工具上限的限制。
+        生成 Claude Desktop / claude.ai 的 MCP 连接配置。12 个工具全在一个端点 /mcp 上，只需连这一条。
       </div>
 
       <!-- 模式切换 -->
@@ -2590,23 +2677,47 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:8px;">端点地址</div>
         <div style="background:var(--surface-solid);border-radius:11px;padding:12px 14px;font-family:monospace;font-size:12px;line-height:2;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <span style="color:var(--text-dim);font-size:11px;min-width:60px;">主 /mcp</span>
+            <span style="color:var(--text-dim);font-size:11px;min-width:60px;">/mcp</span>
             <span id="mcp-url-main" style="flex:1;color:var(--text);word-break:break-all;"></span>
             <button onclick="copyMcpUrl('main')" title="复制" style="padding:3px 8px;font-size:11px;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;color:var(--text-dim);"><i data-lucide="copy"></i></button>
           </div>
-          <div style="border-top:1px solid rgba(150,138,116,0.12);margin:6px 0;"></div>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <span style="color:var(--text-dim);font-size:11px;min-width:60px;">副 /mcp-extra</span>
-            <span id="mcp-url-extra" style="flex:1;color:var(--text);word-break:break-all;"></span>
-            <button onclick="copyMcpUrl('extra')" title="复制" style="padding:3px 8px;font-size:11px;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;color:var(--text-dim);"><i data-lucide="copy"></i></button>
-          </div>
         </div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">12 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
         <div id="mcp-copy-msg" style="margin-top:4px;font-size:11px;color:var(--positive);min-height:16px;"></div>
+      </div>
+
+      <!-- OAuth 鉴权开关 -->
+      <div style="margin:18px 0;padding:14px;background:var(--surface-solid);border-radius:11px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">OAuth 鉴权</div>
+        <div class="config-row" style="align-items:center;">
+          <label>连接鉴权</label>
+          <select id="cfg-mcp-auth" style="flex:1;max-width:440px;min-width:0;">
+            <option value="true">开启 OAuth（Claude.ai 网页版 / Claude Code 远程需要）</option>
+            <option value="false">关闭 · 免认证直连（自有前端 / GPT / GLM）</option>
+          </select>
+          <button type="button" onclick="saveMcpAuth()" title="保存并写入 config.yaml" style="margin-left:8px;padding:0 12px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="save"></i> 保存</button>
+          <span id="mcp-auth-msg" style="margin-left:8px;font-size:11px;"></span>
+        </div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-light);line-height:1.7;">
+          改动写入 config.yaml，<b>需重启服务后生效</b>。关闭后任何能访问 /mcp 的人都能读写记忆，请勿裸奔公网（放内网，或在反代层另加一道鉴权）。
+        </div>
+      </div>
+
+      <!-- 服务端口 -->
+      <div style="margin:18px 0;padding:14px;background:var(--surface-solid);border-radius:11px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">服务端口</div>
+        <div class="config-row" style="align-items:center;">
+          <label>对外端口</label>
+          <input type="number" id="cfg-host-port" min="1" max="65535" placeholder="18001" style="width:140px;" />
+          <button type="button" onclick="saveHostPort()" title="保存端口" style="margin-left:8px;padding:0 12px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="save"></i> 保存</button>
+          <span id="host-port-msg" style="margin-left:8px;font-size:11px;"></span>
+        </div>
+        <div id="host-port-hint" style="margin-top:6px;font-size:11px;color:var(--text-light);line-height:1.7;"></div>
       </div>
 
       <!-- 操作按钮 -->
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <button class="btn-primary" onclick="copyAllMcpUrls()" title="一键复制两条链接"><i data-lucide="copy"></i> 复制全部</button>
+        <button class="btn-primary" onclick="copyAllMcpUrls()" title="复制 /mcp 链接"><i data-lucide="copy"></i> 复制链接</button>
         <button onclick="exportClaudeDesktopConfig()" title="导出 claude_desktop_config.json" style="padding:7px 14px;font-size:13px;border:1px solid var(--border);background:none;border-radius:2px;cursor:pointer;font-family:inherit;color:var(--text);display:inline-flex;align-items:center;gap:6px;"><i data-lucide="download"></i> desktop config</button>
       </div>
 
@@ -2660,6 +2771,10 @@
         <button type="button" onclick="saveGithubConfig()" title="保存配置" style="padding:0 14px;height:36px;font-size:13px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存</button>
         <button type="button" onclick="validateGithub()" title="验证连接" style="padding:0 14px;height:36px;font-size:13px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="shield-check"></i> 验证</button>
         <button type="button" class="btn-primary" onclick="runGithubSync()" id="gh-sync-btn" title="立即同步" style="padding:0 14px;height:36px;font-size:13px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="upload-cloud"></i> 同步</button>
+        <button type="button" onclick="runGithubImport()" id="gh-import-btn" title="从 GitHub 拉回记忆（会覆盖本地同名记忆）" style="padding:0 14px;height:36px;font-size:13px;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--accent,#b85c3c);color:var(--accent,#b85c3c);"><i data-lucide="download-cloud"></i> 从 GitHub 导入</button>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--accent,#b85c3c);line-height:1.6;">
+        ⚠️ 导入 = 把 GitHub 上的记忆拉回本地，<b>会覆盖同名记忆</b>（本地独有的保留）。导入前会自动存一份本地 zip 备份；导入后自动重建向量索引。一般用于换机/数据丢失后的恢复或回滚。
       </div>
 
       <div id="gh-msg" style="margin-top:12px;font-size:12px;min-height:18px;"></div>
@@ -3201,6 +3316,20 @@ async function testDehydrationKey() {
   }
 }
 
+async function testEmbeddingKey() {
+  const msgEl = document.getElementById('emb-key-msg');
+  if (!msgEl) return;
+  msgEl.style.color = 'var(--text-dim)'; msgEl.textContent = '测试中…';
+  const resp = await authFetch('/api/test/embedding', {method: 'POST'});
+  if (!resp) return;
+  const d = await resp.json().catch(() => ({}));
+  if (d.ok) {
+    msgEl.style.color = 'var(--positive, #9DC880)'; msgEl.innerHTML = _SV.ok + ' ' + esc(d.message || '向量化连接成功');
+  } else {
+    msgEl.style.color = 'var(--negative)'; msgEl.innerHTML = _SV.err + ' ' + esc(d.error || '向量化连接失败');
+  }
+}
+
 async function loadSettingsStatus() {
   const el = document.getElementById('settings-status');
   try {
@@ -3220,6 +3349,39 @@ async function loadSettingsStatus() {
     el.textContent = '加载失败: ' + e;
   }
   await loadTunnelStatus();
+}
+
+// 修复钉选计数：先 GET 预演拿孤儿数 → 确认 → POST 实际降级。
+async function fixPinnedDesync() {
+  const msgEl = document.getElementById('fix-pinned-msg');
+  if (!msgEl) return;
+  msgEl.style.color = 'var(--text-dim)'; msgEl.textContent = '检查中…';
+  try {
+    const presp = await authFetch('/api/maintenance/fix-pinned-desync');
+    if (!presp) return;
+    const pd = await readJsonSafe(presp);
+    if (!pd.ok) { msgEl.style.color = 'var(--negative)'; msgEl.innerHTML = _SV.err + ' ' + esc(pd.error || '检查失败'); return; }
+    const n = (pd.orphans || []).length;
+    if (n === 0) {
+      msgEl.style.color = 'var(--positive, #9DC880)';
+      msgEl.innerHTML = _SV.ok + ` 计数已对齐，当前钉选 ${pd.pinned} 个，无需修复`;
+      return;
+    }
+    if (!confirm(`发现 ${n} 个孤儿固化桶（已取消钉选却没降级）。\n将把它们降级回动态桶（释放配额、解开权重卡死），不会删除内容。是否继续？`)) {
+      msgEl.style.color = 'var(--text-dim)'; msgEl.textContent = '已取消';
+      return;
+    }
+    msgEl.textContent = '修复中…';
+    const aresp = await authFetch('/api/maintenance/fix-pinned-desync', { method: 'POST' });
+    if (!aresp) return;
+    const ad = await readJsonSafe(aresp);
+    if (!ad.ok) { msgEl.style.color = 'var(--negative)'; msgEl.innerHTML = _SV.err + ' ' + esc(ad.error || '修复失败'); return; }
+    msgEl.style.color = 'var(--positive, #9DC880)';
+    msgEl.innerHTML = _SV.ok + ` 已降级 ${ad.demoted} 个` + (ad.failed ? `，失败 ${ad.failed} 个` : '') + `，现在钉选 ${ad.pinned} 个`;
+    await loadSettingsStatus();
+  } catch (e) {
+    msgEl.style.color = 'var(--negative)'; msgEl.innerHTML = _SV.err + ' ' + esc(e.message || String(e));
+  }
 }
 
 // #6: 环境变量面板
@@ -4695,6 +4857,113 @@ window.ObPet = (function () {
 
 function updateChick(total) { if (window.ObPet) ObPet.setCount(total || 0); }
 
+// =====================================================
+// ⑨b 小鸡彩蛋：天气 / 时段 / 最近记忆「心理状态」联动
+// 纯装饰、可有可无：悬停时把这三样揉成一句话塞进 .chick-tip，
+// 并按时段给画布上色。任何一环失败都静默跳过，不影响小鸡本体。
+// =====================================================
+(function ObChickFlavor(){
+  var weather = null;  // {emoji, desc, temp} | null
+
+  function getBuckets(){ try { return allBuckets || []; } catch(e){ return (window.allBuckets || []); } }
+  function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+
+  function timeOfDay(){
+    var h = new Date().getHours();
+    if (h>=5 && h<8)   return {cls:'tod-dawn',  hi:['天刚亮','清晨好','早上好呀'], emoji:'🌅'};
+    if (h>=8 && h<17)  return {cls:'tod-day',   hi:['白天','此刻','今天'],         emoji:'🌞'};
+    if (h>=17 && h<20) return {cls:'tod-dusk',  hi:['黄昏','傍晚','日落时分'],     emoji:'🌇'};
+    return                    {cls:'tod-night', hi:['夜里','这么晚还醒着','深夜'], emoji:'🌙'};
+  }
+
+  // 最近活跃的几条普通桶，平均 valence/arousal → 心情标签（Russell 象限）
+  function recentMood(){
+    var bs = getBuckets().filter(function(b){
+      return b && typeof b.valence==='number'
+        && b.type!=='letter' && b.type!=='plan' && b.type!=='archived';
+    });
+    if (!bs.length) return null;
+    bs.sort(function(a,b){ return (b.last_active||b.created||'').localeCompare(a.last_active||a.created||''); });
+    var top = bs.slice(0,8), v=0, a=0;
+    top.forEach(function(b){ v += (b.valence!=null?b.valence:0.5); a += (b.arousal!=null?b.arousal:0.3); });
+    v/=top.length; a/=top.length;
+    if (v>=0.62) return a>=0.55 ? {label:'雀跃',     emoji:'✨'} : {label:'暖洋洋',   emoji:'☺️'};
+    if (v<=0.40) return a>=0.55 ? {label:'有点烦躁', emoji:'😖'} : {label:'有点低落', emoji:'🥺'};
+    return            a>=0.55 ? {label:'微微紧绷', emoji:'😬'} : {label:'平平静静', emoji:'🍃'};
+  }
+
+  // 天气：open-meteo（无 key、CORS 友好）。坐标按时区粗映射，查不到就不显示天气。
+  var TZ = {
+    'Australia/Sydney':[-33.87,151.21],'Australia/Melbourne':[-37.81,144.96],
+    'Asia/Shanghai':[31.23,121.47],'Asia/Hong_Kong':[22.32,114.17],'Asia/Taipei':[25.03,121.57],
+    'Asia/Tokyo':[35.68,139.69],'Asia/Singapore':[1.35,103.82],'Asia/Seoul':[37.57,126.98],
+    'Asia/Bangkok':[13.76,100.50],'Asia/Kolkata':[28.61,77.21],'Asia/Dubai':[25.20,55.27],
+    'Europe/London':[51.51,-0.13],'Europe/Paris':[48.86,2.35],'Europe/Berlin':[52.52,13.40],
+    'America/New_York':[40.71,-74.01],'America/Los_Angeles':[34.05,-118.24],'America/Chicago':[41.88,-87.63]
+  };
+  function wmo(c){
+    if (c===0) return {emoji:'☀️',desc:'晴'};
+    if (c<=3)  return {emoji:'⛅',desc:'多云'};
+    if (c<=48) return {emoji:'🌫️',desc:'雾蒙蒙'};
+    if (c<=57) return {emoji:'🌦️',desc:'毛毛雨'};
+    if (c<=67) return {emoji:'🌧️',desc:'下雨'};
+    if (c<=77) return {emoji:'❄️',desc:'下雪'};
+    if (c<=82) return {emoji:'🌧️',desc:'阵雨'};
+    if (c<=86) return {emoji:'🌨️',desc:'阵雪'};
+    if (c<=99) return {emoji:'⛈️',desc:'打雷'};
+    return null;
+  }
+  function fetchWeather(){
+    try {
+      var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      var c = TZ[tz]; if (!c) return;
+      var ctrl = new AbortController(); setTimeout(function(){ try{ctrl.abort();}catch(e){} }, 3500);
+      fetch('https://api.open-meteo.com/v1/forecast?latitude='+c[0]+'&longitude='+c[1]+'&current=temperature_2m,weather_code', {signal:ctrl.signal})
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(j){
+          if (!j || !j.current) return;
+          var w = wmo(j.current.weather_code); if (!w) return;
+          weather = { emoji:w.emoji, desc:w.desc, temp:Math.round(j.current.temperature_2m) };
+        }).catch(function(){});
+    } catch(e){}
+  }
+
+  function compose(){
+    // 偶尔来一句纯废话
+    if (Math.random()<0.18) return pick([
+      '我在站岗 🐤','刚啄了一下你的记忆','别看了，专心 :)','咕… 我也想被记住','存点好的给我孵 🥚','今天也要乖乖的'
+    ]);
+    var tod = timeOfDay(), mood = recentMood(), parts = [];
+    parts.push(pick(tod.hi)+' '+tod.emoji);
+    if (weather) parts.push(weather.emoji + (Math.random()<0.5 ? (' '+weather.desc) : (' '+weather.temp+'°')));
+    if (mood)    parts.push(mood.emoji + ' 记忆里' + mood.label);
+    return parts.join(' · ');
+  }
+
+  function applyTint(){
+    var host = document.getElementById('ob-chick'); if (!host) return;
+    host.classList.remove('tod-dawn','tod-day','tod-dusk','tod-night');
+    host.classList.add(timeOfDay().cls);
+  }
+
+  function hook(){
+    var host = document.getElementById('ob-chick');
+    if (!host) { return setTimeout(hook, 1000); }   // 小鸡可能还没 ensure()，等一下
+    applyTint();
+    host.addEventListener('mouseenter', function(){
+      var tip = host.querySelector('.chick-tip');
+      if (!tip || host.classList.contains('raging')) return;  // 暴走时不抢话
+      tip.textContent = compose();
+    });
+    setInterval(applyTint, 5*60*1000);   // 每 5 分钟跟一次时段
+  }
+
+  fetchWeather();
+  setInterval(fetchWeather, 30*60*1000);
+  if (document.readyState !== 'loading') hook();
+  else document.addEventListener('DOMContentLoaded', hook);
+})();
+
 // 搜索框空闲时，placeholder 偶尔换一句
 var _phLines = [
   '搜索记忆…',
@@ -5032,6 +5301,71 @@ function _startEmbMigratePolling() {
   _embMigratePollTimer = setInterval(pollEmbMigrateStatus, 3000);
 }
 
+// --- 补齐缺失向量（backfill）：只给缺向量的桶补一发，不重算全库 ---
+var _embBackfillPollTimer = null;
+function _renderBackfillStatus(s) {
+  var el = document.getElementById('emb-backfill-status');
+  if (!el) return;
+  if (!s || s.status === 'idle') { el.innerHTML = ''; return; }
+  var html = '';
+  if (s.status === 'scanning') {
+    html = '扫描全库，找缺向量的桶…';
+  } else if (s.status === 'embedding') {
+    var tot = s.missing || 0;
+    var pct = tot > 0 ? Math.floor(((s.done + s.failed) / tot) * 100) : 0;
+    html = '补齐中：<b>' + (s.done + s.failed) + ' / ' + tot + '</b> (' + pct + '%)'
+      + ' · 成功 ' + s.done + ' · 失败 ' + (s.failed || 0);
+  } else if (s.status === 'done') {
+    if ((s.missing || 0) === 0) {
+      html = '<b style="color:var(--positive,#2a8)">' + _SV.ok + ' 全部桶都有向量，无需补齐。</b>';
+    } else {
+      html = '<b style="color:var(--positive,#2a8)">' + _SV.ok + ' 完成：</b>扫描 ' + s.scanned
+        + ' · 缺失 ' + s.missing + ' · 补齐 ' + s.done
+        + (s.failed ? ' · <span style="color:var(--negative,#c33)">失败 ' + s.failed + '</span>' : '');
+    }
+  } else if (s.status === 'error') {
+    html = '<b style="color:var(--negative,#c33)">' + _SV.err + ' 出错：' + esc(s.error || '') + '</b>';
+  }
+  el.innerHTML = html;
+}
+
+async function pollBackfillStatus() {
+  try {
+    var r = await fetch(BASE + '/api/embedding/backfill/status');
+    var d = await readJsonSafe(r);
+    if (!d || !d.ok) return;
+    _renderBackfillStatus(d.backfill);
+    if (d.backfill && !d.backfill.running) {
+      if (_embBackfillPollTimer) { clearInterval(_embBackfillPollTimer); _embBackfillPollTimer = null; }
+      var btn = document.getElementById('emb-backfill-btn');
+      if (btn) btn.disabled = false;
+      refreshEmbInfo();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function startBackfill() {
+  if (!confirm('补齐缺失向量：\n\n· 只给 embeddings.db 里没有的桶生成向量，不动已有向量\n· 比「重算全库」省额度，幂等，可反复点\n· 后台运行，期间可正常使用\n\n开始？')) return;
+  var st = document.getElementById('emb-backfill-status');
+  var btn = document.getElementById('emb-backfill-btn');
+  if (st) st.textContent = '启动中…';
+  try {
+    var r = await authFetch('/api/embedding/backfill', { method: 'POST' });
+    if (!r) return;
+    var d = await readJsonSafe(r);
+    if (r.status === 202 && d.ok) {
+      if (btn) btn.disabled = true;
+      if (_embBackfillPollTimer) return;
+      pollBackfillStatus();
+      _embBackfillPollTimer = setInterval(pollBackfillStatus, 2000);
+    } else {
+      if (st) st.innerHTML = '<b style="color:var(--negative,#c33)">启动失败：' + esc(d.error || ('HTTP ' + r.status)) + '</b>';
+    }
+  } catch (e) {
+    if (st) st.innerHTML = '<b style="color:var(--negative,#c33)">请求失败：' + esc(e.message || e) + '</b>';
+  }
+}
+
 document.addEventListener('click', function(e) {
   if (e.target && e.target.id === 'emb-migrate-btn') {
     var targetBackend = document.getElementById('cfg-emb-backend').value;
@@ -5049,7 +5383,9 @@ document.addEventListener('click', function(e) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target_backend: targetBackend })
     }).then(function(r) {
-      return r.json().then(function(d) { return { status: r.status, body: d }; });
+      // 经 readJsonSafe 解析：响应体为空 / 网关 502 HTML（隧道重连、Safari）时
+      // 给人话错误，而不是 iOS Safari 那句 "The string did not match the expected pattern."
+      return readJsonSafe(r).then(function(d) { return { status: r.status, body: d }; });
     }).then(function(res) {
       btn.disabled = false;
       btn.textContent = '切换 / 重算所有 embedding…';
@@ -5070,6 +5406,18 @@ document.addEventListener('click', function(e) {
 async function loadLocalEmbStatus() {
   var el = document.getElementById('local-emb-status');
   if (!el) return;
+  // 1) 环境检测（os/arch/docker/已装/在跑）
+  var envD = null;
+  try { var er = await authFetch('/api/embedding/local/env'); if (er) envD = await readJsonSafe(er); } catch (e) {}
+  var envEl = document.getElementById('local-emb-env');
+  if (envEl && envD && envD.ok) {
+    var osName = ({windows:'Windows', linux:'Linux', macos:'macOS'})[envD.os] || envD.os;
+    envEl.innerHTML = '本机：<b>' + esc(osName) + ' / ' + esc(envD.arch) + '</b>'
+      + (envD.in_docker ? ' · <span style="color:var(--warning,#b89962)">Docker 容器</span>' : ' · 原生')
+      + ' · 运行时' + (envD.installed ? ('<span style="color:var(--positive,#7EAD68)">已装</span>') : '未装')
+      + ' · 服务' + (envD.running ? ('<span style="color:var(--positive,#7EAD68)">在跑</span>') : '未跑');
+  }
+  // 2) ollama 服务 + 模型状态
   try {
     var r = await authFetch('/api/embedding/local/status?model=bge-m3');
     if (!r) return;
@@ -5078,17 +5426,79 @@ async function loadLocalEmbStatus() {
     el.innerHTML =
       'Ollama 服务：' + (d.reachable ? '<b style="color:var(--positive,#7EAD68)">已连接</b>' : '<b style="color:var(--negative)">未连接</b>') +
       ' · <code>' + esc(d.ollama_url || '') + '</code><br>' +
-      'bge-m3 模型：' + (d.has_model ? '<b style="color:var(--positive,#7EAD68)">已就绪 ' + _SV.ok + '</b>' : '<b style="color:var(--warning,#b89962)">未下载（先点①）</b>') +
+      'bge-m3 模型：' + (d.has_model ? '<b style="color:var(--positive,#7EAD68)">已就绪 ' + _SV.ok + '</b>' : '<b style="color:var(--warning,#b89962)">未下载</b>') +
       (d.models && d.models.length ? '<br><span style="color:var(--text-light)">已装：' + d.models.map(esc).join(', ') + '</span>' : '');
     var hint = document.getElementById('local-emb-hint');
     if (hint) {
-      if (!d.reachable) hint.innerHTML = _SV.warn + ' 未检测到 ollama。VPS 上应有常驻 <code>ombre-ollama</code> 容器；本机自建：<code>docker run -d --name ombre-ollama --restart unless-stopped -v ollama:/root/.ollama ollama/ollama</code> 并与 OB 同网络。';
+      if (envD && envD.in_docker) hint.innerHTML = _SV.warn + ' Docker 部署：启用自带的本地向量化容器 <code>docker compose -f docker-compose.user.yml --profile local up -d</code>（容器内无法给宿主装运行时），起好后回来「下载 bge-m3」→「切本地」。';
+      else if (!d.reachable && envD && !envD.installed) hint.innerHTML = _SV.info + ' 还没装本地运行时。点「一键本地化」或「1·安装运行时」自动装（免管理员 / sudo）。';
+      else if (!d.reachable) hint.innerHTML = _SV.info + ' 运行时已装但没在跑，点「2·启动」。';
       else hint.textContent = '提示：切换云端↔本地会全库重算（Gemini 3072 维 ↔ bge-m3 1024 维不通用），重算期间检索暂用旧库，不影响使用。';
     }
     if (d.pull && d.pull.running) { _renderLocalPull(d.pull); _startLocalPullPolling(); }
   } catch (e) {
     el.textContent = '状态读取失败：' + (e.message || e);
   }
+}
+
+// ---- 本地运行时：安装 / 启动 ----
+function _binMirror() {
+  var sel = (document.getElementById('local-emb-binmirror') || {}).value || 'official';
+  var custom = ((document.getElementById('local-emb-binmirror-custom') || {}).value || '').trim();
+  return custom || sel;
+}
+var _installTimer = null;
+function _renderInstall(s) {
+  var el = document.getElementById('local-emb-install-status');
+  if (!el || !s) return;
+  if (s.phase === 'idle') { el.textContent = ''; return; }
+  if (s.phase === 'error') {
+    el.innerHTML = '<b style="color:var(--negative)">' + _SV.err + ' 安装失败：' + esc(s.error || '') + '</b>'
+      + (s.hint ? '<br><span style="color:var(--text-light)">' + esc(s.hint) + '</span>' : '');
+    return;
+  }
+  if (s.phase === 'done') { el.innerHTML = '<b style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 运行时安装完成</b>'; return; }
+  var ph = ({ starting:'准备', downloading:'下载中', installing:'安装中', extracting:'解压中' })[s.phase] || s.phase;
+  el.innerHTML = ph + (s.percent ? ' · ' + s.percent + '%' : '') + (s.msg ? ' · ' + esc(s.msg) : '');
+}
+async function _installAndWait() {
+  var el = document.getElementById('local-emb-install-status');
+  if (el) el.textContent = '启动安装…';
+  var r = await authFetch('/api/embedding/local/install', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mirror: _binMirror() }) });
+  if (!r) return { ok:false };
+  var d = await readJsonSafe(r);
+  if (d.already) { if (el) el.innerHTML = '<b style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 运行时已安装</b>'; return { ok:true }; }
+  if (!(r.status === 202 && d.ok)) { if (el) el.innerHTML = '<b style="color:var(--negative)">' + _SV.err + ' ' + esc(d.error || ('HTTP ' + r.status)) + '</b>'; return { ok:false, error:d.error }; }
+  return await new Promise(function (resolve) {
+    if (_installTimer) clearInterval(_installTimer);
+    _installTimer = setInterval(async function () {
+      try {
+        var sr = await authFetch('/api/embedding/local/install/status');
+        if (!sr) return;
+        var sd = await readJsonSafe(sr);
+        if (!sd.ok) return;
+        _renderInstall(sd.install);
+        if (sd.install && !sd.install.running) {
+          clearInterval(_installTimer); _installTimer = null;
+          loadLocalEmbStatus();
+          resolve({ ok: sd.install.phase === 'done', error: sd.install.error });
+        }
+      } catch (e) { /* keep waiting */ }
+    }, 1500);
+  });
+}
+async function installOllama() { await _installAndWait(); }
+async function startOllama() {
+  var el = document.getElementById('local-emb-install-status');
+  if (el) el.textContent = '启动 ollama…';
+  try {
+    var r = await authFetch('/api/embedding/local/start', { method:'POST' });
+    if (!r) return false;
+    var d = await readJsonSafe(r);
+    if (d.ok) { if (el) el.innerHTML = '<b style="color:var(--positive,#7EAD68)">' + _SV.ok + ' ollama 已在跑</b>'; loadLocalEmbStatus(); return true; }
+    if (el) el.innerHTML = '<b style="color:var(--negative)">' + _SV.err + ' ' + esc(d.error || '启动失败') + '</b>';
+    return false;
+  } catch (e) { if (el) el.innerHTML = '<b style="color:var(--negative)">' + _SV.err + ' ' + esc(e.message || e) + '</b>'; return false; }
 }
 
 var _localPullTimer = null;
@@ -5165,24 +5575,81 @@ async function switchEmbedding(mode, skipConfirm) {
   }
 }
 
-// 一键搭建：检查 ollama → 缺模型则下载并等待 → 切换到本地并重算
+// ===== 服务商预设：选一下自动填好 base_url + 正确的 model 名 =====
+// 参考酒馆：先选「用哪个」，字段自动长出来；从根上消灭「填错 model 名 400」那类坑。
+// 只填现有字段、不改保存逻辑（保存仍读这些 input 的值）。
+var EMBED_PRESETS = {
+  gemini:      { format: 'openai_compat', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-embedding-001' },
+  siliconflow: { format: 'openai_compat', base_url: 'https://api.siliconflow.cn/v1', model: 'BAAI/bge-m3' },
+  ollama:      { format: 'ollama',        base_url: '', model: 'bge-m3' },
+  custom:      { format: 'openai_compat', base_url: '', model: '' }
+};
+var DEHY_PRESETS = {
+  deepseek:    { format: 'openai_compat', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  gemini:      { format: 'openai_compat', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-2.5-flash-lite' },
+  siliconflow: { format: 'openai_compat', base_url: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+  anthropic:   { format: 'anthropic',     base_url: 'https://api.anthropic.com', model: 'claude-3-5-haiku-latest' },
+  custom:      { format: 'openai_compat', base_url: '', model: '' }
+};
+function _setVal(id, v) { var el = document.getElementById(id); if (el != null) el.value = v; }
+function applyEmbedPreset() {
+  var k = (document.getElementById('emb-preset') || {}).value || '';
+  var p = EMBED_PRESETS[k]; if (!p) return;
+  _setVal('cfg-emb-format', p.format);
+  _setVal('cfg-emb-base-url', p.base_url);
+  _setVal('cfg-emb-model', p.model);
+  if (k === 'ollama') _setVal('cfg-emb-enabled', 'true');
+  if (typeof onEmbFormatChange === 'function') onEmbFormatChange();
+  var hint = document.getElementById('emb-preset-hint');
+  if (hint) hint.textContent = (k === 'ollama')
+    ? '本地模式：填好了 bge-m3。无需 key —— 用下方「一键本地化」装+起+下模型，或已起 ollama 就直接「保存」。'
+    : '已自动填好 Base URL + 模型名，填入对应 key 点「保存」再「测试」即可。';
+}
+function applyDehyPreset() {
+  var k = (document.getElementById('dehy-preset') || {}).value || '';
+  var p = DEHY_PRESETS[k]; if (!p) return;
+  _setVal('cfg-dehy-format', p.format);
+  _setVal('cfg-dehy-url', p.base_url);
+  _setVal('cfg-dehy-model', p.model);
+  if (typeof onDehyFormatChange === 'function') onDehyFormatChange();
+  var hint = document.getElementById('dehy-preset-hint');
+  if (hint) hint.textContent = '已自动填好 Base URL + 模型名，填入对应 key 点「保存」再「测试」即可。';
+}
+
+// 一键本地化：检测系统 → 装运行时（免提权）→ 起子进程 → 下模型 → 切本地重算
 async function oneClickLocal() {
-  if (!confirm('一键搭建本地向量化（bge-m3）：\n\n· 需要约 2–3GB 空闲内存 + 1.2GB 磁盘\n· 下载模型（约 1.2GB）→ 自动切换 → 全库重算向量\n· 全程后台进行，期间可正常使用（检索暂用旧库）\n· 之后可随时切回云端向量化\n\n开始？')) return;
-  var r = await authFetch('/api/embedding/local/status?model=bge-m3');
-  if (!r) return;
-  var d;
-  try { d = await readJsonSafe(r); } catch (e) { alert('读取本地状态失败：' + (e.message || e)); return; }
-  if (!d.ok || !d.reachable) {
-    alert('未检测到 Ollama 服务。\n\n请先启动 ollama 容器（与 OB 同一 docker 网络）：\n\n  docker run -d --name ombre-ollama --restart unless-stopped \\\n    -v ollama:/root/.ollama ollama/ollama\n\n或在 deploy/docker-compose.yml 里启用 ollama 服务后：docker compose up -d ollama\n\n启动后再点本按钮。');
+  var er = await authFetch('/api/embedding/local/env');
+  if (!er) return;
+  var env = await readJsonSafe(er);
+  if (!env || !env.ok) { alert('环境检测失败，请稍后重试。'); return; }
+  if (env.in_docker) {
+    alert('检测到 OB 运行在 Docker 容器里。\n\n本地向量化请启用自带的 ollama 容器（容器内无法给宿主装运行时）：\n\n  docker compose -f docker-compose.user.yml --profile local up -d\n\n起好后回来：「下载 bge-m3」→「切本地」即可。');
     return;
   }
-  if (!d.has_model) {
+  var osName = ({ windows:'Windows', linux:'Linux', macos:'macOS' })[env.os] || env.os;
+  if (!confirm('一键本地化（检测到：' + osName + ' / ' + env.arch + '）：\n\n· 自动安装 Ollama 运行时（免管理员 / sudo；Win/Linux 约 1.4GB，含 GPU 库）\n· 作为 OB 子进程常驻（OB 在它就在）\n· 下载 bge-m3 模型（约 1.2GB，需 2–3GB 空闲内存）\n· 切到本地并全库重算（期间可正常用）\n\n首次合计需下载约 2–3GB，请确保磁盘/网络够。开始？')) return;
+
+  // 1) 安装运行时
+  if (!env.installed) {
+    var ins = await _installAndWait();
+    if (!ins.ok) { alert('运行时安装未完成，已停在这一步。\n可在「运行时镜像」换成 GitHub 源重试，或按下方提示手动安装后再点一次。'); return; }
+  }
+  // 2) 启动（子进程常驻）
+  if (!env.running) {
+    var started = await startOllama();
+    if (!started) { alert('Ollama 启动失败，已停在这一步。'); return; }
+  }
+  // 3) 缺模型则下载
+  var sr = await authFetch('/api/embedding/local/status?model=bge-m3');
+  var sd = sr ? await readJsonSafe(sr) : null;
+  if (!sd || !sd.has_model) {
     var pmsg = document.getElementById('local-emb-pull-status');
     if (pmsg) pmsg.textContent = '开始下载 bge-m3（约 1.2GB）…';
     await pullLocalModel();
     var ok = await _waitLocalPull();
-    if (!ok) { alert('模型下载未成功，已中止（未改动现有向量）。可在「分步操作」里换个下载镜像重试。'); return; }
+    if (!ok) { alert('模型下载未成功，已中止（未改动现有向量）。可在「模型镜像」换 ModelScope 重试。'); return; }
   }
+  // 4) 切到本地并重算
   await switchEmbedding('ollama', true);
 }
 // 等待拉取完成；true=成功
@@ -5302,6 +5769,54 @@ async function runGithubSync() {
   btn.disabled = false; btn.textContent = '立即同步 ↑';
 }
 
+// 从 GitHub 导入/恢复（会覆盖本地同名记忆）→ 导入后自动重建向量
+async function runGithubImport() {
+  var msg = document.getElementById('gh-msg');
+  var btn = document.getElementById('gh-import-btn');
+  if (!confirm('⚠️ 从 GitHub 导入记忆\n\n会用 GitHub 仓库里的记忆覆盖本地【同名】记忆（本地独有的保留）。\n导入前会自动存一份本地 zip 备份，导入后自动重建向量索引。\n\n常用于换机/数据丢失后的恢复或回滚。确定导入？')) return;
+  if (btn) { btn.disabled = true; }
+  msg.textContent = '正在从 GitHub 拉回记忆…（导入前已自动备份本地）'; msg.style.color = '';
+  try {
+    var res = await authFetch('/api/github/import', { method: 'POST' });
+    var d = await readJsonSafe(res);
+    if (d.ok) {
+      var extra = (d.skipped ? '，跳过 ' + d.skipped : '') + (d.truncated ? '（⚠️ 仓库文件过多被截断，部分未导入）' : '');
+      msg.innerHTML = _SV.ok + ' 导入完成：恢复 ' + (d.imported||0) + ' 条记忆' + extra
+        + (d.pre_import_backup ? '<br><span style="color:var(--text-light)">本地备份：<code>' + esc(d.pre_import_backup) + '</code></span>' : '');
+      msg.style.color = 'var(--success, green)';
+      // 导入后自动重建向量（恢复的桶 embeddings.db 里还没有）
+      if (typeof startBackfill === 'function') {
+        msg.innerHTML += '<br>正在为恢复的记忆重建向量索引…';
+        try { await _runBackfillSilent(); msg.innerHTML += ' ' + _SV.ok; } catch(e){}
+      }
+      await loadGithubStatus();
+      if (typeof loadStatus === 'function') loadStatus();
+    } else {
+      msg.innerHTML = _SV.err + ' ' + esc(d.error || '导入失败');
+      msg.style.color = 'var(--accent)';
+    }
+  } catch(e) { msg.innerHTML = _SV.err + ' ' + esc(e.message || '网络错误'); msg.style.color = 'var(--negative)'; }
+  if (btn) { btn.disabled = false; }
+}
+// 静默跑一次 backfill 并等完成（导入后重建向量用）
+async function _runBackfillSilent() {
+  var r = await authFetch('/api/embedding/backfill', { method: 'POST' });
+  if (!r) return;
+  var d = await readJsonSafe(r);
+  if (!(r.status === 202 && d.ok)) return;
+  await new Promise(function (resolve) {
+    var iv = setInterval(async function () {
+      try {
+        var sr = await authFetch('/api/embedding/backfill/status');
+        if (!sr) return;
+        var sd = await readJsonSafe(sr);
+        if (sd && sd.backfill && !sd.backfill.running) { clearInterval(iv); resolve(); }
+      } catch (e) {}
+    }, 1500);
+    setTimeout(function () { clearInterval(iv); resolve(); }, 180000);
+  });
+}
+
 async function loadConfig() {
   try {
     var res = await authFetch('/api/config');
@@ -5333,12 +5848,24 @@ async function loadConfig() {
     refreshEmbInfo();
     refreshEnvConfig();
     document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
+    var mcpAuthEl = document.getElementById('cfg-mcp-auth');
+    if (mcpAuthEl) mcpAuthEl.value = cfg.mcp_require_auth ? 'true' : 'false';
+    var portEl = document.getElementById('cfg-host-port');
+    if (portEl) portEl.value = cfg.host_port || '';
+    var portHint = document.getElementById('host-port-hint');
+    if (portHint) {
+      portHint.innerHTML = cfg.in_docker
+        ? 'Docker 部署：容器内端口固定，对外端口由 host 映射决定。保存后请在宿主跑 <code>OMBRE_HOST_PORT=端口 docker compose -f deploy/docker-compose.yml up -d</code>（或 <code>bash deploy/deploy.sh</code>）重建生效。'
+        : '裸机部署：保存后<b>重启服务</b>即监听新端口（留空=默认 18001）。';
+    }
     var sf = cfg.surfacing || {};
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
     document.getElementById('config-readonly').innerHTML =
-      'Transport: <strong>' + cfg.transport + '</strong><br>Buckets dir: <strong>' + cfg.buckets_dir + '</strong>';
+      'Transport: <strong>' + cfg.transport + '</strong><br>数据目录: <strong>' + cfg.buckets_dir + '</strong>'
+      + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
+      + '<br>对外端口: <strong>' + (cfg.host_port || '18001（默认）') + '</strong>';
   } catch (e) {
     document.getElementById('config-status').innerHTML =
       '<span style="color:var(--negative)">加载失败: ' + e.message + '</span>';
@@ -5386,6 +5913,9 @@ async function refreshEnvConfig() {
     if (el) el.value = (f['OMBRE_HOOK_URL'] || {}).value || '';
     el = document.getElementById('env-hook-skip');
     if (el) { var skipVal = (f['OMBRE_HOOK_SKIP'] || {}).value || ''; el.value = (skipVal === 'true' || skipVal === '1' || skipVal === 'yes') ? 'true' : ''; }
+    // 平台 env 覆盖告警：检查哪些字段由启动期平台 env 注入（from_boot），
+    // 它们的优先级高于 config.yaml，重启会盖回——dashboard 在这里永远赢不了。
+    refreshEnvShadowWarning();
   } catch (e) {
     // 不再静默吞掉：把失败显示在状态行 + 用 placeholder 提示，避免 key 框卡在「加载中…」
     var st = document.getElementById('env-config-status');
@@ -5395,6 +5925,42 @@ async function refreshEnvConfig() {
       if (el2 && (!el2.placeholder || el2.placeholder.indexOf('加载') !== -1)) el2.placeholder = '（加载失败，请重试）';
     });
   }
+}
+
+// 检测「被平台环境变量接管」的字段并红字告警。
+// 数据源 /api/env-vars 的 from_boot=true ⇒ 该 OMBRE_* 在进程启动那一刻就由平台注入，
+// 优先级高于 config.yaml；dashboard 保存到 config.yaml 的同名值会在下次重启被它覆盖。
+// （注意：dashboard 保存当下也会写 os.environ，故必须用 from_boot 而非 set 来判定，
+//  否则保存后会误报。）
+async function refreshEnvShadowWarning() {
+  var box = document.getElementById('env-shadow-warning');
+  if (!box) return;
+  var LABELS = {
+    OMBRE_COMPRESS_BASE_URL: '压缩 Base URL',
+    OMBRE_COMPRESS_MODEL: '压缩 Model',
+    OMBRE_COMPRESS_API_KEY: '压缩 API Key',
+    OMBRE_EMBED_BASE_URL: '向量化 Base URL',
+    OMBRE_EMBED_MODEL: '向量化 Model',
+    OMBRE_EMBED_API_KEY: '向量化 API Key',
+  };
+  try {
+    var r = await authFetch('/api/env-vars');
+    if (!r) return;
+    var d = await readJsonSafe(r);
+    if (!d || !d.vars) return;
+    var shadowed = d.vars.filter(function (v) { return v.from_boot && LABELS[v.name]; });
+    if (!shadowed.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    var items = shadowed.map(function (v) {
+      return '<code>' + v.name + '</code>（' + LABELS[v.name] + '）';
+    }).join('、');
+    box.innerHTML =
+      '<strong>⚠ 这些字段由平台环境变量提供，重启后会覆盖你在此保存的值：</strong><br>' +
+      items + '<br>' +
+      '它们的优先级高于 <code>config.yaml</code>，所以即便这里改成别的服务商、保存生效了，' +
+      '下次重启/重新部署仍会被平台 env 打回。<br>' +
+      '彻底解决：到平台（如 Zeabur）的环境变量里<strong>删除上述变量</strong>，让 config.yaml/此面板成为唯一来源。';
+    box.style.display = 'block';
+  } catch (e) { /* 告警是增益信息，失败就静默不挡主流程 */ }
 }
 
 async function saveEnvConfig() {
@@ -5621,7 +6187,10 @@ loadVersionBadge();
     var logBox  = document.getElementById('ver-log-box');
     var doneEl  = document.getElementById('ver-update-done');
 
-    if (!confirm('确认开始热更新？\n\n请确保已导出记忆备份，更新期间服务会短暂重启（约 10-30 秒）。')) return;
+    // v2.3.9 起：服务端热更新后会「自我重启」(os.execv 原地替换进程)，
+    // 不再依赖外部守护进程，Docker / Render / Zeabur / 裸机 Mac·Linux·Windows 统一自动恢复。
+    var _confirmMsg = '确认开始热更新？\n\n请确保已导出记忆备份，更新期间服务会自动重启（约 10-30 秒）后自行恢复。';
+    if (!confirm(_confirmMsg)) return;
 
     if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> 更新中…'; lucide.createIcons(); }
     if (logWrap) logWrap.style.display = '';
@@ -5706,8 +6275,14 @@ loadVersionBadge();
         if (vl) vl.textContent = 'v' + _obLocalVersion;
       }
 
-      // 从 raw GitHub 读 VERSION 文件，不依赖是否发布过 Release
-      const rRaw = await fetch('https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/VERSION');
+      // 从 raw GitHub 读 VERSION 文件，不依赖是否发布过 Release。
+      // 破缓存：raw 走 Fastly CDN（max-age=300），且 fetch 默认会进浏览器 HTTP 缓存——
+      // 用户若在 CDN 还缓存着旧版的 5 分钟窗口内点过检查，浏览器会把旧 VERSION 缓存住，
+      // 之后再点直接读本地缓存 → 永远「已是最新」。加时间戳 + no-store 双保险，每次都拿真新值。
+      const rRaw = await fetch(
+        'https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/VERSION?t=' + Date.now(),
+        { cache: 'no-store' }
+      );
       if (!rRaw.ok) throw new Error('无法读取 GitHub VERSION 文件（' + rRaw.status + '）');
       const latestTag = (await rRaw.text()).trim().replace(/^v/, '');
       if (!latestTag) throw new Error('GitHub VERSION 文件为空');
@@ -5892,7 +6467,34 @@ window.addEventListener('DOMContentLoaded', function() {
   }
   updateChick(0);              // 小黄鸡蛋初始（loadBuckets 后会按真实总数更新）
   startPlaceholderRotation();  // 搜索框随机 placeholder
+  checkEmptyMemoryBanner();    // 零记忆时红色提示「可从 GitHub 恢复」
 });
+
+// 更新/换机后发现一条记忆都没有 → 顶部红色横幅，引导从 GitHub 恢复。
+// 只在确实零记忆且已配置 GitHub 时出现；导入按钮平时仍在设置里随时可用。
+async function checkEmptyMemoryBanner() {
+  try {
+    var sr = await authFetch('/api/status');
+    if (!sr) return;
+    var s = await sr.json();
+    var b = s.buckets || {};
+    var live = (b.permanent || 0) + (b.dynamic || 0);
+    if (live > 0) { var ex = document.getElementById('empty-mem-banner'); if (ex) ex.remove(); return; }
+    // 是否配置了 GitHub（有才提恢复）
+    var ghOk = false;
+    try { var gr = await authFetch('/api/github/status'); if (gr) { var gd = await gr.json(); ghOk = !!(gd && (gd.configured || gd.token_set)); } } catch (e) {}
+    if (document.getElementById('empty-mem-banner')) return;
+    var bar = document.createElement('div');
+    bar.id = 'empty-mem-banner';
+    bar.style.cssText = 'position:sticky;top:0;z-index:9999;background:#b85c3c;color:#fff;padding:10px 16px;font-size:13px;line-height:1.6;display:flex;align-items:center;gap:12px;flex-wrap:wrap;box-shadow:0 2px 8px rgba(0,0,0,.25);';
+    bar.innerHTML = '<b>⚠️ 检测到当前没有任何记忆</b>'
+      + (ghOk
+          ? '<span>可从 GitHub 备份恢复（会写入本地，导入前自动备份）。</span><button onclick="runGithubImport()" style="background:#fff;color:#b85c3c;border:none;border-radius:4px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;">从 GitHub 恢复记忆</button>'
+          : '<span>若你在 GitHub 备份过记忆，去「⑦ GitHub 同步」填好配置后即可一键恢复。</span>')
+      + '<button onclick="this.parentNode.remove()" style="margin-left:auto;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.6);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">忽略</button>';
+    document.body.insertBefore(bar, document.body.firstChild);
+  } catch (e) { /* ignore */ }
+}
 window.addEventListener('load', function() {
   if (window.lucide) lucide.createIcons();
   // iter 1.7 §D: auto-render any dynamically-inserted [data-lucide] icons
@@ -6212,22 +6814,71 @@ function _getMcpOrigin() {
   return 'http://127.0.0.1:' + port;
 }
 
+async function saveMcpAuth() {
+  const msg = document.getElementById('mcp-auth-msg');
+  const val = document.getElementById('cfg-mcp-auth').value === 'true';
+  try {
+    const res = await authFetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mcp_require_auth: val, persist: true }),
+    });
+    if (!res) return;
+    const result = await res.json();
+    if (result.ok) {
+      msg.style.color = 'var(--positive)';
+      msg.textContent = '已保存，重启服务后生效';
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = result.error || '保存失败';
+    }
+  } catch (e) {
+    msg.style.color = 'var(--negative)';
+    msg.textContent = '请求失败: ' + e.message;
+  }
+}
+
+async function saveHostPort() {
+  const msg = document.getElementById('host-port-msg');
+  const raw = (document.getElementById('cfg-host-port').value || '').trim();
+  const port = raw === '' ? null : parseInt(raw, 10);
+  if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    msg.style.color = 'var(--negative)'; msg.textContent = '端口需为 1-65535'; return;
+  }
+  try {
+    const res = await authFetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_port: port === null ? 18001 : port, persist: true }),
+    });
+    if (!res) return;
+    const result = await res.json();
+    if (result.ok) {
+      msg.style.color = 'var(--positive)';
+      msg.textContent = '已保存（按上方提示重启 / 重建生效）';
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = result.error || '保存失败';
+    }
+  } catch (e) {
+    msg.style.color = 'var(--negative)';
+    msg.textContent = '请求失败: ' + e.message;
+  }
+}
+
 function renderMcpUrls() {
   const origin = _getMcpOrigin();
   const mainUrl = origin + '/mcp';
-  const extraUrl = origin + '/mcp-extra';
   document.getElementById('mcp-url-main').textContent = mainUrl;
-  document.getElementById('mcp-url-extra').textContent = extraUrl;
   // 更新 JSON 预览
-  const cfg = _buildClaudeDesktopConfig(mainUrl, extraUrl);
+  const cfg = _buildClaudeDesktopConfig(mainUrl);
   document.getElementById('mcp-json-preview').textContent = JSON.stringify(cfg, null, 2);
 }
 
-function _buildClaudeDesktopConfig(mainUrl, extraUrl) {
+function _buildClaudeDesktopConfig(mainUrl) {
   return {
     mcpServers: {
-      "ombre-brain": { url: mainUrl, type: "http" },
-      "ombre-brain-extra": { url: extraUrl, type: "http" }
+      "ombre-brain": { url: mainUrl, type: "http" }
     }
   };
 }
@@ -6240,7 +6891,7 @@ function onMcpModeChange() {
 }
 
 function copyMcpUrl(which) {
-  const el = document.getElementById(which === 'main' ? 'mcp-url-main' : 'mcp-url-extra');
+  const el = document.getElementById('mcp-url-main');
   const text = el?.textContent || '';
   navigator.clipboard.writeText(text).then(() => {
     const msg = document.getElementById('mcp-copy-msg');
@@ -6250,17 +6901,15 @@ function copyMcpUrl(which) {
 
 function copyAllMcpUrls() {
   const main = document.getElementById('mcp-url-main')?.textContent || '';
-  const extra = document.getElementById('mcp-url-extra')?.textContent || '';
-  navigator.clipboard.writeText(main + '\n' + extra).then(() => {
+  navigator.clipboard.writeText(main).then(() => {
     const msg = document.getElementById('mcp-copy-msg');
-    if (msg) { msg.textContent = '已复制两条链接'; setTimeout(() => { msg.textContent = ''; }, 2500); }
+    if (msg) { msg.textContent = '已复制 /mcp 链接'; setTimeout(() => { msg.textContent = ''; }, 2500); }
   });
 }
 
 function exportClaudeDesktopConfig() {
   const mainUrl = document.getElementById('mcp-url-main')?.textContent || '';
-  const extraUrl = document.getElementById('mcp-url-extra')?.textContent || '';
-  const cfg = _buildClaudeDesktopConfig(mainUrl, extraUrl);
+  const cfg = _buildClaudeDesktopConfig(mainUrl);
   const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -7213,10 +7862,44 @@ async function saveHumanName() {
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
-    if (msg) { msg.textContent = '已保存'; msg.style.color = 'var(--positive)'; }
-    setTimeout(function() { if (msg) msg.textContent = ''; }, 2000);
+    var changed = (data.renamed && data.renamed.buckets_changed) || 0;
+    if (msg) {
+      msg.textContent = changed > 0 ? ('已保存，并同步了 ' + changed + ' 条旧记忆') : '已保存';
+      msg.style.color = 'var(--positive)';
+    }
+    setTimeout(function() { if (msg) msg.textContent = ''; }, 4000);
   } catch (e) {
     if (msg) { msg.textContent = '保存失败：' + e.message; msg.style.color = 'var(--negative)'; }
+  }
+}
+
+async function syncExistingHuman() {
+  var fromEl = document.getElementById('settings-human-from');
+  var msg = document.getElementById('settings-human-sync-msg');
+  var from = fromEl ? fromEl.value.trim() : '';
+  if (!from) from = '用户';
+  if (msg) { msg.textContent = '替换中…'; msg.style.color = 'var(--text-dim)'; }
+  try {
+    var res = await fetch(BASE + '/api/settings/human/sync-existing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: from }),
+    });
+    var data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    if (data.note) {
+      if (msg) { msg.textContent = data.note; msg.style.color = 'var(--text-dim)'; }
+      return;
+    }
+    var changed = (data.renamed && data.renamed.buckets_changed) || 0;
+    if (msg) {
+      msg.textContent = changed > 0
+        ? ('已把「' + data.from + '」→「' + data.to + '」，更新了 ' + changed + ' 条记忆')
+        : ('没有找到含「' + data.from + '」的旧记忆');
+      msg.style.color = changed > 0 ? 'var(--positive)' : 'var(--text-dim)';
+    }
+  } catch (e) {
+    if (msg) { msg.textContent = '替换失败：' + e.message; msg.style.color = 'var(--negative)'; }
   }
 }
 </script>

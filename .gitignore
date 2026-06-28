@@ -1,8 +1,15 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# OS / 工具产生的杂物（曾被误提交，2026-06 清理）
+.DS_Store
+.coverage
+.coverage.*
+config.yaml.dir/
 .env
 .venv/
+.venv*/
 venv/
 .claude/
 .vscode/

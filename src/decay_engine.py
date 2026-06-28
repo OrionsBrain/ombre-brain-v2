@@ -52,6 +52,11 @@ _DEFAULT_AROUSAL_BOOST = 0.8      # arousal 每 +1 → 情感权重 +0.8
 _SCORE_PINNED = 999.0    # pinned / protected / permanent 桶恒高分（永不归档）
 _SCORE_FEEL = 50.0       # feel / plan / letter 桶固定中分（生命周期由 status 控制）
 
+# --- 周期自愈：每轮衰减最多补多少条缺失向量（防一次性打爆 embedding API）---
+# 活跃桶落盘了但 embeddings.db 没它的向量 → breath 向量通道会漏掉它（permanent
+# 尤其常见，见 #6）。剩余的下一轮继续补。
+_BACKFILL_MAX_PER_CYCLE = 50
+
 # --- Freshness bonus：bonus = 1 + e^(-hours/HALF_LIFE) ---
 _FRESHNESS_HALF_LIFE_HRS = 36.0  # 36h 半衰：刚存 ×2.0，36h 后 ×1.5，72h 后 ≈×1.14
 _FRESHNESS_AMPLITUDE = 1.0       # bonus 上限增量（0 → 无加成；1 → 最多 ×2）
@@ -289,6 +294,7 @@ class DecayEngine:
         auto_resolved = 0
         lowest_score = float("inf")
 
+        demoted_orphans = 0
         for bucket in buckets:
             meta = bucket.get("metadata", {})
 
@@ -350,14 +356,57 @@ class DecayEngine:
                         f"归档失败: {e}"
                     )
 
+        # --- Self-heal: 补齐缺失向量（周期性，详见 _self_heal_embeddings）---
+        backfilled_embeddings = await self._self_heal_embeddings(buckets)
+
         result = {
             "checked": checked,
             "archived": archived,
             "auto_resolved": auto_resolved,
+            "demoted_orphans": demoted_orphans,
+            "backfilled_embeddings": backfilled_embeddings,
             "lowest_score": lowest_score if checked > 0 else 0,
         }
         logger.info(f"Decay cycle complete / 衰减周期完成: {result}")
         return result
+
+    async def _self_heal_embeddings(self, buckets: list) -> int:
+        """周期自愈：给「落盘了但 embeddings.db 里没向量」的活跃桶补向量。
+
+        背景（#6）：permanent 桶常因批量导入 / dashboard 钉选而漏建向量，
+        breath 的向量通道就检索不到它们，表现为「只读得到 dynamic」。衰减循环
+        每轮顺手补齐，无需人工跑 backfill_embeddings.py。
+
+        边界：embedding 未启用 → 跳过；每轮最多补 _BACKFILL_MAX_PER_CYCLE 条
+        （防打爆 API），剩余下一轮继续；单条失败仅 warning（rule.md §1.5 允许降级）。
+        只处理活跃桶（buckets 不含 archive），不在此删孤儿向量（删除走专用脚本，
+        避免把 archive 桶的有效向量误判为孤儿）。"""
+        ee = getattr(self.bucket_mgr, "embedding_engine", None)
+        if not ee or not getattr(ee, "enabled", False):
+            return 0
+        try:
+            index_ids = set(ee.list_all_ids())
+        except Exception as e:
+            logger.warning(f"self-heal embeddings: 读取向量索引失败: {e}")
+            return 0
+        missing = [b for b in buckets if b["id"] not in index_ids and (b.get("content") or "").strip()]
+        if not missing:
+            return 0
+        healed = 0
+        for b in missing[:_BACKFILL_MAX_PER_CYCLE]:
+            try:
+                await ee.generate_and_store(b["id"], b["content"])
+                healed += 1
+            except Exception as e:
+                logger.warning(f"self-heal embeddings: 补 {b['id']} 失败: {e}")
+        if healed:
+            remaining = len(missing) - healed
+            logger.info(
+                f"Decay self-heal / 自愈补向量: {healed} 条"
+                + (f"（本轮上限 {_BACKFILL_MAX_PER_CYCLE}，剩 {remaining} 下轮继续）"
+                   if remaining > 0 else "")
+            )
+        return healed
 
     # ---------------------------------------------------------
     # Background decay task management

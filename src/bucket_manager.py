@@ -117,6 +117,7 @@ _RIPPLE_BOOST = 0.3        # 唤醒时 activation_count 增量
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
 _RESOLVED_RANK_PENALTY = 0.3   # resolved 桶仅在排序时降权
+_LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文时的召回加分（修短查询召回）
 
 # --- _calc_topic_score 文本维度权重 ---
 _TOPIC_NAME_W = 3.0
@@ -375,6 +376,8 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+        if bucket_type == "permanent" or pinned:
+            metadata["type"] = "permanent"
 
         # --- iter 2.0: 来源工具与 grow 批次 ---
         # source_tool 留空 = 调用方未声明（兼容老逻辑），不写 frontmatter。
@@ -435,8 +438,6 @@ class BucketManager:
         # --- 按类型 + 主题域选择存储目录 ---
         if bucket_type == "permanent" or pinned:
             type_dir = self.permanent_dir
-            if pinned and bucket_type != "permanent":
-                metadata["type"] = "permanent"
         elif bucket_type == "feel":
             type_dir = self.feel_dir
         elif bucket_type == "plan":
@@ -549,6 +550,7 @@ class BucketManager:
 
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
         # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
+        was_pinned = bool(post.get("pinned", False))
         is_pinned = post.get("pinned", False) or post.get("protected", False)
         if is_pinned:
             kwargs.pop("importance", None)  # silently ignore importance update
@@ -574,6 +576,7 @@ class BucketManager:
             post["pinned"] = bool(kwargs["pinned"])
             if kwargs["pinned"]:
                 post["importance"] = _PINNED_IMPORTANCE  # pinned → lock importance to 10
+                post.metadata.pop("anchor", None)  # pinned 与 anchor 互斥：钉为核心准则即清除坐标系标记
         if "digested" in kwargs:
             post["digested"] = bool(kwargs["digested"])
         if "model_valence" in kwargs:
@@ -657,6 +660,20 @@ class BucketManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
+        # --- Reverse: unpin → demote only buckets that were actually pinned.
+        # `type=permanent` is also a first-class bucket type, so an idempotent
+        # pinned=False update must not move explicit permanent memories.
+        elif (
+            "pinned" in kwargs
+            and not kwargs.get("pinned")
+            and was_pinned
+            and not post.get("protected")
+            and post.get("type") == "permanent"
+        ):
+            post["type"] = "dynamic"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            self._move_bucket(file_path, self.dynamic_dir, domain)
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
 
@@ -843,6 +860,8 @@ class BucketManager:
             return []
 
         limit = limit or self.max_results
+        # 字面召回：把查询原样（小写、去空白）留作子串匹配，保证显式搜的词必被召回
+        q_norm = query.strip().lower()
         all_buckets = await self.list_all(include_archive=False)
 
         if not all_buckets:
@@ -892,6 +911,17 @@ class BucketManager:
             meta = bucket.get("metadata", {})
 
             try:
+                # 字面命中：查询串原样出现在 name/tags/domain/正文 → 召回保障 + 排序加分
+                literal_hit = False
+                if q_norm:
+                    hay = " ".join([
+                        str(meta.get("name", "")),
+                        " ".join(str(t) for t in (meta.get("tags") or [])),
+                        " ".join(str(d) for d in (meta.get("domain") or [])),
+                        bucket.get("content", "") or "",
+                    ]).lower()
+                    literal_hit = q_norm in hay
+
                 # Dim 1: topic relevance (fuzzy text, 0~1)
                 topic_score = self._calc_topic_score(query, bucket)
 
@@ -934,10 +964,16 @@ class BucketManager:
                 # Normalize to 0~100 for readability
                 normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
+                # 字面命中加分 + 召回保障：修复短查询（如 2 字"杭州"）即使正文里有也
+                # 因加权分被各维度稀释到 fuzzy_threshold 以下而整条搜不到。
+                # 用户显式搜的词必须召回，故 literal_hit 直接放行（OR），并给排序加分。
+                if literal_hit:
+                    normalized = min(100.0, normalized + _LITERAL_MATCH_BONUS)
+
                 # Threshold check uses raw (pre-penalty) score so resolved buckets
                 # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
                 # remain reachable by keyword (penalty applied only to ranking).
-                if normalized >= self.fuzzy_threshold:
+                if normalized >= self.fuzzy_threshold or literal_hit:
                     # Resolved buckets get ranking penalty (but still reachable by keyword)
                     # 已解决的桶仅在排序时降权
                     if meta.get("resolved", False):
@@ -1073,6 +1109,17 @@ class BucketManager:
             count = await self.count_anchors()
             return {"ok": True, "anchor": target, "count": count, "limit": self.ANCHOR_LIMIT, "noop": True}
         if target is True:
+            # pinned/protected 与 anchor 互斥：pinned=永远置顶浮现（核心准则），
+            # anchor=刻意不浮现（坐标系），两者语义直接矛盾。允许并存会让一个
+            # pinned+anchor 桶每会话都以「核心准则」冒头，诱导模型反复 release
+            # 却压不住它。这里直接拒绝，提示先 trace(pinned=0) 再改坐标系。
+            if bucket["metadata"].get("pinned") or bucket["metadata"].get("protected"):
+                return {
+                    "ok": False,
+                    "error": "这是 pinned 核心准则，不能同时设为 anchor（两者互斥）。要改成坐标系请先 trace(pinned=0)。",
+                    "count": await self.count_anchors(),
+                    "limit": self.ANCHOR_LIMIT,
+                }
             count = await self.count_anchors()
             if count >= self.ANCHOR_LIMIT:
                 return {
@@ -1337,6 +1384,13 @@ class BucketManager:
         try:
             post = frontmatter.load(file_path)
             metadata = dict(post.metadata)
+            domain_value = metadata.get("domain")
+            if isinstance(domain_value, str):
+                metadata["domain"] = [domain_value] if domain_value.strip() else []
+            elif domain_value is None:
+                metadata["domain"] = []
+            elif not isinstance(domain_value, list):
+                metadata["domain"] = list(domain_value) if isinstance(domain_value, tuple) else [str(domain_value)]
             # 兼容老桶可能存储了 'V0.9'、'[我的视角:V0.3]' 等字符串格式
             for field, default in (("valence", 0.5), ("arousal", 0.3)):
                 if field in metadata:

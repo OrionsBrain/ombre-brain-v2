@@ -143,17 +143,74 @@ def check_content_size(content: str) -> str | None:
 
 
 async def count_pinned() -> int:
-    """统计当前 pinned 桶数量。失败时返回 0（保守，不阻断）。"""
+    """统计当前 pinned 桶数量。失败时返回 0（保守，不阻断）。
+
+    配额的唯一真相是 metadata.pinned。type=permanent 是正式固化类型，
+    不等同于 pinned=True，也不占用 pinned 配额。
+    """
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
         return sum(
             1 for b in all_b
             if b.get("metadata", {}).get("pinned")
-            or b.get("metadata", {}).get("type") == "permanent"
         )
     except Exception as e:
         rt.logger.warning(f"count_pinned failed: {e}")
         return 0
+
+
+def _is_pinned_orphan(meta: dict) -> bool:
+    """Return True only for confidently repairable pinned/type desync.
+
+    `type == "permanent"` is now a first-class bucket type, not just the
+    storage side effect of `pinned=True`.  Metadata alone cannot safely
+    distinguish a legacy unpinned-pinned bucket from an intentionally permanent
+    bucket, so automatic demotion is intentionally disabled.
+    """
+    return False
+
+
+async def repair_pinned_desync(bucket_mgr, apply: bool = False) -> dict:
+    """扫描 pinned/type 脱钩项；当前不会自动降级 permanent。
+
+    type=permanent 现在是正式固化类型。仅凭 metadata 无法安全地区分
+    历史取消钉选残留和用户显式创建的 permanent 桶，所以自动降级已禁用。
+
+    返回 dict：{total, pinned, orphans:[{id,name,importance}], applied, demoted, failed}。"""
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    pinned_now = [b for b in buckets if b.get("metadata", {}).get("pinned")]
+    orphans = [b for b in buckets if _is_pinned_orphan(b.get("metadata", {}))]
+
+    result: dict = {
+        "total": len(buckets),
+        "pinned": len(pinned_now),
+        "orphans": [
+            {
+                "id": b["id"],
+                "name": b.get("metadata", {}).get("name") or "",
+                "importance": b.get("metadata", {}).get("importance"),
+            }
+            for b in orphans
+        ],
+        "applied": apply,
+        "demoted": 0,
+        "failed": 0,
+    }
+    if not apply or not orphans:
+        return result
+
+    for b in orphans:
+        try:
+            ok = await bucket_mgr.update(b["id"], pinned=False)
+            if ok:
+                result["demoted"] += 1
+            else:
+                result["failed"] += 1
+                rt.logger.warning(f"repair_pinned_desync: update returned False for {b['id']}")
+        except Exception as e:
+            result["failed"] += 1
+            rt.logger.warning(f"repair_pinned_desync: update failed for {b['id']}: {e}")
+    return result
 
 
 async def check_pinned_quota() -> str | None:
@@ -393,17 +450,19 @@ async def _merge_or_create_inner(
         source_tool=source_tool,
         grow_batch_id=grow_batch_id,
     )
-    # --- 新桶生成 embedding；失败时返回警告（降级，不报错）---
-    # 允许降级：embedding 失败桶仍有效，仅丧失语义检索能力，设计上明确接受此降级
+    # iter 2.1+ 起 create() 内部已调用 _sync_embedding，此处无需重复生成。
+    # 只需从 embedding_engine 探测上次是否成功（检查 db 中是否有该 id）。
+    # 失败时返回警告（降级，不报错）——embedding 失败桶仍有效，仅丧失语义检索能力。
     embed_warn = ""
     try:
-        ok = await rt.embedding_engine.generate_and_store(bucket_id, content)
-        if not ok:
-            embed_warn = _EMBED_WARN
-            rt.logger.info(
-                f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
-                f"reason=generate_returned_false"
-            )
+        if rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
+            existing = await rt.embedding_engine.get_embedding(bucket_id)
+            if existing is None:
+                embed_warn = _EMBED_WARN
+                rt.logger.info(
+                    f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
+                    f"reason=no_embedding_after_create"
+                )
     except Exception as _embed_exc:
         embed_warn = _EMBED_WARN
         rt.logger.info(

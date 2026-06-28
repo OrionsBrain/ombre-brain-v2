@@ -167,15 +167,39 @@ async def letter_read(
 
     letters = [b for b in letters if _within(b)]
 
-    if query and query.strip() and rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
+    query_text = query.strip()
+
+    def _matches_query(b):
+        if not query_text:
+            return True
+        meta = b.get("metadata", {})
+        parts = [
+            b.get("content", ""),
+            str(meta.get("name") or ""),
+            str(meta.get("title") or ""),
+            str(meta.get("author") or ""),
+        ]
+        parts.extend(str(t) for t in (meta.get("tags") or []))
+        return query_text.lower() in "\n".join(parts).lower()
+
+    if query_text and rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
         try:
-            sims = await rt.embedding_engine.search_similar(query, top_k=limit * 3)
+            sims = await rt.embedding_engine.search_similar(query_text, top_k=limit * 3)
             id_score = {bid: sc for bid, sc in sims}
-            letters.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
+            vector_matches = [b for b in letters if b["id"] in id_score]
+            if vector_matches:
+                letters = vector_matches
+                letters.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
+            else:
+                letters = [b for b in letters if _matches_query(b)]
+                letters.sort(key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""), reverse=True)
         except Exception as e:
             rt.logger.warning(f"letter_read vector search failed: {e}")
+            letters = [b for b in letters if _matches_query(b)]
             letters.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
     else:
+        if query_text:
+            letters = [b for b in letters if _matches_query(b)]
         letters.sort(key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""), reverse=True)
 
     letters = letters[:limit]

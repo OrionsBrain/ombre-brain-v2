@@ -78,6 +78,13 @@ async def trace_core(
     if not bucket:
         return f"未找到记忆桶: {bucket_id}"
 
+    meta = bucket.get("metadata", {})
+    if 1 <= importance <= 10 and (meta.get("pinned") or meta.get("protected")):
+        return (
+            f"记忆桶 {bucket_id} 是 pinned/protected 核心桶，importance 被锁定为 10，"
+            "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
+        )
+
     updates: dict = {}
     if name:
         updates["name"] = name

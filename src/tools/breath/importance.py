@@ -58,9 +58,13 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
                 summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
             except Exception as dehy_err:
                 rt.logger.warning(f"importance_min dehydrate failed / 脱水失败: {dehy_err}")
-                is_pinned = b["metadata"].get("pinned") or b["metadata"].get("protected")
-                if is_pinned:
-                    # pinned 桶脱水失败时降级展示原文，确保核心准则可见
+                is_core = (
+                    b["metadata"].get("pinned")
+                    or b["metadata"].get("protected")
+                    or b["metadata"].get("type") == "permanent"
+                )
+                if is_core:
+                    # Core buckets must remain readable even when dehydration fails.
                     summary = strip_wikilinks(b["content"])[:300].strip() or "（空记忆）"
                 else:
                     continue

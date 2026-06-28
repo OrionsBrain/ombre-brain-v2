@@ -75,11 +75,6 @@ async def _write_i(content: str, aspect: str) -> str:
     except Exception:
         pass
 
-    try:
-        await rt.embedding_engine.generate_and_store(bucket_id, content)
-    except Exception:
-        pass
-
     aspect_label = f"[{aspect}] " if aspect else ""
     return f"🪞I {aspect_label}→{bucket_id}"
 

@@ -55,11 +55,43 @@ _LOG_FALLBACK_DIR = "/tmp/ombre_logs"  # 所有候选路径都失败时的最终
 # sanitize_name() 桶名最大长度（防止文件名过长导致 OS 报错）。
 _BUCKET_NAME_MAX_LEN = 80
 
+# 进程启动那一刻就被「真实 OS / 平台」注入的 OMBRE_* 环境变量名集合（值非空才算）。
+# 在任何 dashboard 保存动作 mutate os.environ 之前快照——这是「平台级 env」与
+# 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
+# 用途：dashboard 据此提示「这些字段由平台环境变量提供，重启会覆盖你这里保存的值」，
+# 修复「config.yaml 存了 Gemini，但平台 OMBRE_COMPRESS_BASE_URL=DeepSeek 每次重启盖回」的坑。
+BOOT_ENV_OMBRE: frozenset[str] = frozenset(
+    k for k, v in os.environ.items() if k.startswith("OMBRE_") and str(v).strip()
+)
+
 
 def _project_root() -> str:
     """Return absolute path to the project root (parent of src/ where utils.py lives).
     项目根目录（src/ 的上一层）。"""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def config_file_path() -> str:
+    """config.yaml 的绝对路径 —— 读 / 写 / entrypoint 三方共用的单一真相。
+
+    顺序：
+      1. $OMBRE_CONFIG_PATH —— 显式指定即采纳，**即便文件尚不存在**
+         （entrypoint 会在服务启动前据此创建；Dashboard 写配置时也据此落盘）。
+      2. <cwd>/config.yaml —— 存在才用。
+      3. <project_root>/config.yaml —— 兜底默认。
+
+    为什么独立成函数：load_config 读、Dashboard（config_api/buckets/github/
+    embedding）写、entrypoint 初始化——以前各处都硬编码 <repo_root>/config.yaml。
+    一旦把 config 挪进数据目录（修 Docker 单文件 bind mount 在 Windows 被建成
+    目录、容器崩溃重启的坑），读和写就会分叉到不同路径、Dashboard 存的 key 重启即丢。
+    统一到这里，OMBRE_CONFIG_PATH 一处生效、读写永远同一个文件。"""
+    env_cfg = os.environ.get("OMBRE_CONFIG_PATH", "").strip()
+    if env_cfg:
+        return env_cfg
+    cwd_cfg = os.path.join(os.getcwd(), "config.yaml")
+    if os.path.exists(cwd_cfg):
+        return cwd_cfg
+    return os.path.join(_project_root(), "config.yaml")
 
 
 def load_config(config_path: Optional[str] = None) -> dict:
@@ -103,15 +135,8 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # --- Load user config from YAML file ---
     # --- 从 YAML 文件加载她/他的自定义配置 ---
     if config_path is None:
-        # Search order: $OMBRE_CONFIG_PATH → cwd/config.yaml → project_root/config.yaml
-        # 查找顺序：环境变量 > 当前工作目录 > 项目根目录
-        env_cfg = os.environ.get("OMBRE_CONFIG_PATH", "").strip()
-        if env_cfg and os.path.exists(env_cfg):
-            config_path = env_cfg
-        elif os.path.exists(os.path.join(os.getcwd(), "config.yaml")):
-            config_path = os.path.join(os.getcwd(), "config.yaml")
-        else:
-            config_path = os.path.join(project_root, "config.yaml")
+        # 读写共用同一解析逻辑（config_file_path）：$OMBRE_CONFIG_PATH > cwd > project_root。
+        config_path = config_file_path()
 
     config = defaults.copy()
     if os.path.exists(config_path):
@@ -155,6 +180,19 @@ def load_config(config_path: Optional[str] = None) -> dict:
     _apply_env_override(config, "OMBRE_TRANSPORT", "transport")
     _apply_env_override(config, "OMBRE_BUCKETS_DIR", "buckets_dir")
     env_buckets_dir = os.environ.get("OMBRE_BUCKETS_DIR", "")
+
+    # MCP OAuth 开关（布尔，单独处理）—— OMBRE_MCP_REQUIRE_AUTH
+    # 不能走 _apply_env_override：它只写字符串，而 server.py 用
+    # bool(config.get("mcp_require_auth", True)) 判定——字符串 "false" 是 truthy，
+    # 会导致设了 =false 反而仍开启鉴权。这里显式解析成真正的 bool。
+    # 用途：把 OB 接进自有前端 / GPT / GLM 等不走 OAuth 的客户端时，
+    # 设 OMBRE_MCP_REQUIRE_AUTH=false（或 config.yaml: mcp_require_auth: false）即可免认证直连 /mcp。
+    # 仅在显式设置为可识别的值时才覆盖；不设 / 设成乱七八糟的值都保持默认（安全：默认开启）。
+    _env_mcp_auth = os.environ.get("OMBRE_MCP_REQUIRE_AUTH", "").strip().lower()
+    if _env_mcp_auth in ("0", "false", "no", "off"):
+        config["mcp_require_auth"] = False
+    elif _env_mcp_auth in ("1", "true", "yes", "on"):
+        config["mcp_require_auth"] = True
 
     # iter 1.9 F: 统一推荐 OMBRE_VAULT_DIR；老变量 OMBRE_BUCKETS_DIR 仍兼容
     # Priority: OMBRE_BUCKETS_DIR (legacy explicit) > OMBRE_VAULT_DIR > config.yaml.buckets_dir
@@ -371,9 +409,17 @@ def extract_wikilinks(text: str) -> list[str]:
 def get_version() -> str:
     """Read project version from `<repo_root>/VERSION`.
 
-    版本号统一来源：根目录 VERSION 文件。每次发版只改这个文件 + git tag。
-    Docker 镜像里 src/ 旁也复制了一份作 fallback（见 Dockerfile）。
+    存在两份 VERSION：src/VERSION 与根目录 VERSION。读取顺序：src/VERSION 优先。
     任何路径都读不到时返回 "0.0.0+unknown"，方便排查。
+
+    ⚠️ 为什么是 src 优先（别再改成根目录优先）：
+      热更新（web/meta.py do-update）解压时只覆盖 src/ 和 frontend/，所以 src/VERSION
+      一定被刷新，而很多用户的根目录 VERSION 是历史安装遗留的老版本（从没人读、也没人更）。
+      若改成根目录优先，用户一更新就会读到那个尘封的旧根 VERSION → 版本号当场倒退
+      （2.3.10 真踩过：有人从 2.3.8 更新后显示成 2.1.3）。
+      一致性由 do-update「强制把 zip 的根 VERSION 同写到两处」保证；这里只管读那个
+      最可靠新鲜的 src/VERSION。
+      发版请同时 bump 两个 VERSION（根 + src/）。
 
     Python 小知识：
       * `with open(...) as f:` 是「上下文管理器」，离开 with 块自动关文件
@@ -382,10 +428,9 @@ def get_version() -> str:
         比裸 `except:` 安全，比 `except FileNotFoundError` 全面
     """
     candidates = [
-        # Docker 场景：src/ 是 bind mount（/opt/ombre-brain/src），宿主机可直接编辑
-        # 优先读这里，比 image 层烤死的 /app/VERSION 更新
+        # 优先：src/ 旁的副本——热更新一定会刷新它，最可靠新鲜
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
-        # 本地开发：src/ 同级的项目根目录
+        # fallback：项目根目录 VERSION（Docker 里由 Dockerfile COPY 进 /app/VERSION）
         os.path.join(_project_root(), "VERSION"),
     ]
     for path in candidates:
@@ -421,7 +466,10 @@ def safe_path(base_dir: str, filename: str) -> Path:
     """
     base = Path(base_dir).resolve()
     target = (base / filename).resolve()
-    if not str(target).startswith(str(base)):
+    # 用 is_relative_to 而不是 startswith，避免前缀混淆：
+    # 例如 base=/data/buckets，target=/data/buckets_evil/f.md，
+    # str 前缀检查会误判为安全，is_relative_to 不会。
+    if not target.is_relative_to(base):
         raise ValueError(
             f"Path safety check failed / 路径安全检查失败: "
             f"{target} is not inside / 不在 {base} 内"

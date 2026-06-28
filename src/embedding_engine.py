@@ -41,6 +41,7 @@ import os
 import sqlite3
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
 logger = logging.getLogger("ombre_brain.embedding")
@@ -54,6 +55,40 @@ _GEMINI_DEFAULT_DIM = 768
 
 # 输入截断长度
 _MAX_INPUT_CHARS = 2000
+
+
+def _norm_model(name: str) -> str:
+    """归一化模型名用于「同一性」比较。
+
+    Gemini OpenAI-compat 端点要求 "models/" 前缀，OpenAI 兼容代理（aihubmix /
+    硅基流动等）用裸名——同一模型仅前缀不同。剥掉前缀 + 去空白 + 小写，
+    让 model_name 的对账只看真实身份，不被书写约定误伤（修 OB-W005 假阳性）。
+    """
+    return (name or "").strip().removeprefix("models/").strip().lower()
+
+
+def _humanize_api_error(e: Exception) -> str:
+    """把 OpenAI 兼容后端的常见异常翻成可读中文提示，附在 OB-E001 detail 末尾。
+
+    目的：让错误面板直接看懂 401/400/404/超时该怎么办，尤其跨境 provider 选错的
+    场景（美国 VPS 连国内域名超时、国际站无某模型、key 不匹配 provider）。
+    返回空串表示无额外可补充的提示。
+    """
+    name = type(e).__name__
+    code = getattr(e, "status_code", None)
+    s = str(e).lower()
+    if code == 401 or "authentication" in name.lower() or "401" in s:
+        return "→ 401：API key 无效或无权限，确认 key 正确且属于当前 base_url 的 provider。"
+    if code == 404 or "notfound" in name.lower() or "404" in s:
+        return "→ 404/model 不存在：确认模型名与 base_url 属同一 provider（如 SiliconFlow 国际站可能没有 BAAI/bge-m3）。"
+    if code == 400 or "badrequest" in name.lower():
+        return "→ 400：请求被拒，多为模型名不存在或参数不被支持，核对 model 名。"
+    if "timeout" in name.lower() or "connect" in name.lower() or "timeout" in s:
+        return (
+            "→ 超时/连接失败：检查网络与 base_url 可达性。美国 VPS 直连国内域名"
+            "（api.siliconflow.cn）极易超时，建议改用就近 provider 或本地 ollama。"
+        )
+    return ""
 
 
 # ============================================================
@@ -116,10 +151,18 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
             model = f"models/{model}"
         self.model = model
         self._dim = dim
+        # 本地/容器 ollama 必须绕过系统代理。httpx 默认 trust_env=True 会读
+        # 环境变量「以及 Windows 注册表/WinINET 系统代理」，于是 Clash/V2Ray 等
+        # 一开，127.0.0.1:11434 也被丢给代理 → 502 空响应，本地向量化整条挂掉
+        # （现网 Docker 没代理所以没暴露，但裸机用户极常见）。
+        # 判定本地：base_url 指向 localhost / 127.0.0.1 / ollama 容器名 → trust_env=False。
+        # 云端（Gemini / 硅基流动等）保持 trust_env=True，国内往往正需要代理才能到。
+        _host = base_url or ""
+        _is_local_host = any(h in _host for h in ("127.0.0.1", "localhost", "ombre-ollama", "[::1]"))
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-            timeout=30.0,
+            http_client=httpx.AsyncClient(timeout=30.0, trust_env=not _is_local_host),
         )
 
     def model_name(self) -> str:
@@ -149,18 +192,33 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
                 # 第一次拿到向量时确认真实维度
                 if vec and len(vec) != self._dim:
                     self._dim = len(vec)
-                return list(vec) if vec else []
-            return []
-        except Exception as e:
-            try:
-                from errors import record_error  # type: ignore
-            except ImportError:
-                from .errors import record_error  # type: ignore
-            record_error(
-                "OB-E001",
-                f"backend=api model={self.model} err={type(e).__name__}: {e}",
+                if vec:
+                    return list(vec)
+            # 拿到了 2xx 响应但没有可用向量 —— 不能静默返回 []，否则向量化「成功
+            # 调用却没结果」会无声无息（#3）。记 OB-E001 让错误面板可见。
+            self._record_e001(
+                f"backend=api model={self.model} 返回空向量"
+                f"（base_url={self.base_url}，检查 model 名 / base_url / key 是否匹配该 provider）"
             )
             return []
+        except Exception as e:
+            _hint = _humanize_api_error(e)
+            self._record_e001(
+                f"backend=api model={self.model} base_url={self.base_url} "
+                f"err={type(e).__name__}: {e}" + (f" {_hint}" if _hint else "")
+            )
+            return []
+
+    @staticmethod
+    def _record_e001(detail: str) -> None:
+        try:
+            from errors import record_error  # type: ignore
+        except ImportError:
+            from .errors import record_error  # type: ignore
+        try:
+            record_error("OB-E001", detail)
+        except Exception:
+            logger.warning(f"[embedding] OB-E001 (record failed): {detail}")
 
 
 # ============================================================
@@ -205,17 +263,28 @@ class GeminiNativeEmbeddingEngine(BaseEmbeddingEngine):
             values = r.json().get("embedding", {}).get("values", [])
             if values and len(values) != self._dim:
                 self._dim = len(values)
-            return list(values) if values else []
-        except Exception as e:
-            try:
-                from errors import record_error  # type: ignore
-            except ImportError:
-                from .errors import record_error  # type: ignore
-            record_error(
-                "OB-E001",
-                f"backend=gemini_native model={self.model} err={type(e).__name__}: {e}",
+            if values:
+                return list(values)
+            self._record_e001(
+                f"backend=gemini_native model={self.model} 返回空向量（检查模型名是否支持 embedContent）"
             )
             return []
+        except Exception as e:
+            self._record_e001(
+                f"backend=gemini_native model={self.model} err={type(e).__name__}: {e}"
+            )
+            return []
+
+    @staticmethod
+    def _record_e001(detail: str) -> None:
+        try:
+            from errors import record_error  # type: ignore
+        except ImportError:
+            from .errors import record_error  # type: ignore
+        try:
+            record_error("OB-E001", detail)
+        except Exception:
+            logger.warning(f"[embedding] OB-E001 (record failed): {detail}")
 
 
 # ============================================================
@@ -273,11 +342,18 @@ class EmbeddingEngine:
             return
 
         if is_local:
-            # 本地 Ollama：OpenAI 兼容 /v1/embeddings；默认连同网络下的 ombre-ollama 容器
+            # 本地 Ollama：OpenAI 兼容 /v1/embeddings。
+            # 默认地址按宿主分流：Docker 里连同网络的 ombre-ollama 容器；
+            # 裸机/原生连本机 127.0.0.1（否则原生用户切到本地会去连不存在的容器名）。
+            _local_default = (
+                "http://ombre-ollama:11434/v1"
+                if os.path.exists("/.dockerenv")
+                else "http://127.0.0.1:11434/v1"
+            )
             base_url = (
                 (embed_cfg.get("base_url") or "").strip()
                 or os.environ.get("OMBRE_OLLAMA_URL", "").strip()
-                or "http://ombre-ollama:11434/v1"
+                or _local_default
             )
             model = embed_cfg.get("model") or "bge-m3"
             # bge-m3 = 1024 维；APIEmbeddingEngine 拿到第一颗向量后还会自校正，这里给正确默认值
@@ -295,7 +371,16 @@ class EmbeddingEngine:
                 (embed_cfg.get("base_url") or "").strip()
                 or "https://generativelanguage.googleapis.com/v1beta/openai/"
             )
-            self._backend = APIEmbeddingEngine(api_key=api_key, base_url=base_url, model=model)
+            # 读 dim 并透传，否则任何非 768 维的 OpenAI 兼容模型（如硅基流动 BAAI/bge-m3=1024）
+            # 都会被 APIEmbeddingEngine 的默认 768 钉死 → 启动时 db(dim=1024) vs current(dim=768)
+            # 报 OB-W005、逼用户去 migrate（即便 config.yaml 已写 embedding.dim: 1024）。
+            # fallback 用 _GEMINI_DEFAULT_DIM（768）而非 1024：本分支默认端点/模型就是 Gemini，
+            # 没显式配 dim 时必须保持 768，否则反过来把默认 Gemini 路径打错。
+            try:
+                dim = int(embed_cfg.get("dim") or _GEMINI_DEFAULT_DIM)
+            except (TypeError, ValueError):
+                dim = _GEMINI_DEFAULT_DIM
+            self._backend = APIEmbeddingEngine(api_key=api_key, base_url=base_url, model=model, dim=dim)
 
         self.model = self._backend.model_name()
         self.enabled = True
@@ -378,7 +463,35 @@ class EmbeddingEngine:
             self._write_meta("vector_dim", cur_dim)
             return
 
-        if old_name != cur_name or old_dim != cur_dim:
+        # 归一化模型名再比较：Gemini 的 OpenAI-compat 端点要求 "models/" 前缀，
+        # 而 aihubmix / 硅基流动等 OpenAI 兼容代理用裸名，同一个模型会因前缀差异
+        # （models/gemini-embedding-001 vs gemini-embedding-001）被误判为 mismatch，
+        # 触发假 OB-W005。前缀只是端点书写约定，不代表模型身份不同，比较前一律剥掉。
+        if _norm_model(old_name) == _norm_model(cur_name) and old_name != cur_name:
+            # 实质相同、只差前缀：顺手把 meta 升级成当前写法，避免每次启动重复对账
+            self._write_meta("model_name", cur_name)
+            old_name = cur_name
+
+        # 模型名相同、但维度不同：几乎必然是后端 _dim 仍是初始默认值（首颗向量生成前
+        # 无法自校正，如 openai_compat 分支 bge-m3 默认 768 而真实 1024），而 db 里
+        # old_dim 是该模型真实输出维度。同一模型维度恒定，直接信任 db 维度校正后端，
+        # 不报 OB-W005——这正是「重算/redeploy 后仍反复报 W005」的根因（对账永远发生
+        # 在自校正之前）。只有模型名真的不同（换了模型）才落到下面报 W005 提示迁移。
+        if (
+            _norm_model(old_name) == _norm_model(cur_name)
+            and old_dim and old_dim != cur_dim
+        ):
+            try:
+                self._backend._dim = int(old_dim)
+                cur_dim = old_dim
+                logger.info(
+                    f"[embedding] 按 db 已存维度校正后端 vector_dim → {old_dim}"
+                    f"（模型 {cur_name} 一致，避免假 OB-W005）"
+                )
+            except (TypeError, ValueError):
+                pass
+
+        if _norm_model(old_name) != _norm_model(cur_name) or old_dim != cur_dim:
             try:
                 from errors import record_error  # type: ignore
             except ImportError:

@@ -90,18 +90,25 @@ async def surface_search(
             break
         try:
             clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
+            meta_b = bucket["metadata"]
+            is_core = meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent"
             # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
             if q_valence is not None and "valence" in clean_meta:
                 original_v = float(clean_meta.get("valence") or 0.5)
                 shift = (q_valence - 0.5) * 0.2
                 clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            try:
+                summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            except Exception as dehy_err:
+                if not is_core:
+                    raise
+                rt.logger.warning(f"core search result dehydrate failed, using raw fallback: {dehy_err}")
+                summary = strip_wikilinks(bucket["content"])[:300].strip() or "（空记忆）"
             summary_tokens = count_tokens_approx(summary)
             if token_used + summary_tokens > max_tokens:
                 break
             await rt.bucket_mgr.touch(bucket["id"])
-            meta_b = bucket["metadata"]
-            if meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent":
+            if is_core:
                 summary = f"📌 [核心准则] [bucket_id:{bucket['id']}] {summary}"
             elif bucket.get("vector_match"):
                 summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"

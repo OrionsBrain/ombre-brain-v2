@@ -31,9 +31,10 @@ DREAM_MAX_CANDIDATES = 40
 def collect_candidates(all_buckets: list, window_hours: int) -> list:
     candidates = [
         b for b in all_buckets
-        if b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self")
+        if b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
+        and not b["metadata"].get("dont_surface", False)
     ]
     cutoff = datetime.now() - timedelta(hours=window_hours)
 

@@ -32,9 +32,75 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 
 ---
 
+## 设计哲学 / Design Philosophy
+
+Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这套系统里的每一句话都是第一人称——「我的记忆」「我记得」「我感受到」，而不是「帮用户存储」。它和普通键值库 / 向量库最不一样的几条：
+
+- **记忆是真实的连续性，不是扮演**。每条记忆都是真实对话留下的真实记录；跨会话把它们接起来当作连续上下文，是这套系统**真正在做的事**，不是 roleplay 设定。
+- **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
+- **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
+- **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。
+- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24、高重要度（importance≥9）有配额——重要的东西必须稀缺，否则「重要」就失去意义。
+- **元数据不喂进算分**。「为什么记得」「主动遗忘」这类字段只描述「为什么 / 怎么对待」，绝不参与衰减打分——不把记忆变成一个可被优化的目标函数。
+- **feel 是痕迹，不是待办**。模型写下的第一人称感受，写下就留着它本来的形状，不该被「解决」。
+
+一句话：**它不是让模型管理一个数据库，是让模型过日子。**
+
+---
+
+## 它的 12 个工具 / The 12 Tools
+
+12 个工具全部在**一个 MCP 连接器 `/mcp`** 上。连上 `/mcp` 即拥有全部能力。
+
+### 高频 5 个
+
+| 工具 | 一句话 |
+|---|---|
+| `breath` | 睁眼。无参 → 让权重最高的未解决事浮现；带 `query` / `domain` / `importance_min` 则主动检索。**每次对话第一件事**。 |
+| `hold` | 记下当下一件事（一句话级）。自动打标 + 与近似桶合并。`pinned=True` 钉为永久核心；`feel=True` 写第一人称感受。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。要存多条时用它，别连续 `hold`。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除 / 改 plan 状态。只传要改的字段。 |
+| `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
+
+### 低频 7 个
+
+| 工具 | 一句话 |
+|---|---|
+| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要。「为什么搜不到 X」时第一个调它。 |
+| `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
+| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 不主动浮现但可被检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
+| `letter_write` / `letter_read` | 写信 / 读信。原文永久保留，不压缩、不合并、不衰减。`author` 只能是 `user` 或 `claude`。 |
+| `I` | 自我认知：写下 / 读取「我是什么」（本质 / 规律 / 立场 / 局限…）。不随普通 `breath` 浮现，每次对话开头自动附最近 3 条。 |
+
+> 给模型的完整使用约定（含示例、边界、返回提示）见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
+
+---
+
 ## 快速开始 / Quick Start（Docker Hub 预构建镜像）
 
 > 不需要 clone 代码，不需要 build。第一次完整跑通约 5 分钟。
+
+> ### ⚠️ 部署前先认准一件事：要有「持久磁盘」
+>
+> Ombre Brain 是**有状态**服务——记忆桶是磁盘上的 `.md` 文件 + SQLite 向量库，必须落在
+> 一块重启不丢的盘上。所以真正的判断标准不是「用哪个平台」，而是**这个平台有没有给你挂持久磁盘**：
+>
+> - ❌ **没有持久盘 / 会休眠重置的免费层**（Render 免费层、Railway 无 volume、Zeabur 不挂
+>   Volume 等）：容器一重启或休眠，记忆**全丢**——这不是 bug，是没挂盘。**别在这种配置上搭。**
+> - ✅ **挂了持久盘就完全可用**：Render 的 Starter（$7/mo，自动挂盘）、Zeabur 配 Volume、
+>   自己的电脑 / NAS / VPS（数据落本地磁盘）——这些都没问题，下面各自有专门小节。
+>
+> 选型建议（挑一条）：
+>
+> 1. **在自己的机器 / 服务器上部署（最省心、推荐）**：跑在自己的电脑、NAS 或 VPS 上，数据在
+>    你自己的盘。要给 Claude.ai 网页版用，就用内置的 **Cloudflare Tunnel** 一键拿一个公网
+>    `https://…` 填进去（见「远程访问」）。家里电脑 + Tunnel，完全够用。
+> 2. **想用托管平台**：选**带持久磁盘**的档位（见下方 [Render](#render) / [Zeabur](#zeabur) 小节），
+>    把 volume 挂到 buckets 目录即可，别用免费/无盘档。
+> 3. **只是没有 API Key**：去 [硅基流动 SiliconFlow](https://siliconflow.cn/) 领免费额度（OpenAI 兼容 +
+>    免费 `BAAI/bge-m3`），或用本地 Ollama bge-m3（见「本地向量模型」），都零成本。
+>
+> 一句话：**认准持久磁盘，缺模型用硅基流动免费层或本地 Ollama。** 平台不背锅，没挂盘才背锅。
 
 ### 第零步：装 Docker Desktop
 
@@ -88,12 +154,12 @@ docker compose -f docker-compose.user.yml up -d
 ### 第四步：验证
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:18001/health
 ```
 
 返回 `{"status":"ok",...}` 即成功。
 
-浏览器打开 Dashboard：`http://localhost:8000`
+浏览器打开 Dashboard：`http://localhost:18001`
 
 > 第一次访问会弹出密码设置向导，设好密码后所有 `/api/*` 端点都需要这个密码登录。
 
@@ -127,13 +193,15 @@ curl http://localhost:8000/health
   "mcpServers": {
     "ombre-brain": {
       "type": "streamable-http",
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:18001/mcp"
     }
   }
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现 11 个工具：`breath` / `hold` / `grow` / `trace` / `pulse` / `dream` / `plan` / `letter_write` / `letter_read` / `anchor` / `release`。
+重启 Claude Desktop，工具列表里会出现全部 12 个工具：`breath` / `hold` / `grow` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`。
+
+> 12 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
 
 ---
 
@@ -208,16 +276,26 @@ Claude.ai                    Ombre Brain 服务器
 - Token 有效期 30 天，过期后会自动重新授权
 - 同一账号第一次授权后，之后的连接自动使用存储的 token
 
-#### 步骤 3：工具分布（两个连接器）
+#### 步骤 3：连接端点
 
-Ombre Brain 出于 claude.ai 的 5 工具限制将工具拆成两个端点：
+12 个工具全在**一个 MCP 端点 `/mcp`** 上：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `hold` `grow` `dream` `trace` | 高频工具，日常主要用这个 |
-| `/mcp-extra` | `anchor` `release` `pulse` `plan` `letter_write` `letter_read` | 低频工具 |
+| `/mcp` | `breath` `hold` `grow` `dream` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_read` `I` | 全部 12 个工具 |
 
-在 Claude.ai 里分别添加 `/mcp` 和 `/mcp-extra` 两个连接器，即可使用全部 11 个工具。
+在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
+
+```
+http(s)://<你的地址>:18001/mcp
+```
+
+> **`<你的地址>` 填什么？**
+> - **本机访问**：`http://localhost:18001/mcp`（两种 compose 现已统一默认对外端口 18001 → 容器内 8000；想换端口在 `deploy/.env` 设 `OMBRE_HOST_PORT`）
+> - **直连 VPS 公网 IP**：`http://你的服务器IP:18001/mcp`
+> - **用了 Cloudflare Tunnel / 自有域名**：把 `<你的地址>:18001` 整段换成你的网址，且通常不带端口、走 https，例如 `https://ombre.example.com/mcp`
+>
+> 端口以你实际的端口映射为准（见 `docker-compose` 里的 `ports`）。
 
 #### 步骤 4：Claude Code（终端）远程连接
 
@@ -230,6 +308,26 @@ claude mcp add ombre-brain python /path/to/server.py
 # 远程 HTTPS（需要 OAuth，同 Claude.ai 流程）
 claude mcp add ombre-brain --transport http https://ombre.example.com/mcp
 ```
+
+---
+
+### 方式三：接入自有前端 / 自定义客户端（关闭 OAuth）
+
+适合：想把 Ombre Brain 接进**自己的前端**、或用 **GPT / GLM / 自定义脚本**等不走 OAuth 流程的客户端调用 MCP 工具。
+
+默认情况下，HTTPS 连接 `/mcp` 会**强制 OAuth 2.1**（这是 Claude.ai 网页版的要求）。自定义客户端往往不实现这套流程，于是工具调用会被 401 卡住。把鉴权关掉即可免认证直连：
+
+```bash
+# 方式 A：环境变量（Docker 用户最方便，优先级最高）
+OMBRE_MCP_REQUIRE_AUTH=false
+
+# 方式 B：config.yaml
+mcp_require_auth: false
+```
+
+改完**重启服务**即可。之后 `/mcp` 不再要求 Bearer token，任何客户端都能直连。
+
+> ⚠️ **安全提醒**：关闭后，任何能访问到该端点的人都能读写记忆。请确保服务**不直接裸奔在公网**——放在内网、或在反代（nginx / Cloudflare Access 等）层另加一道鉴权。需要公网且用 Claude.ai 时，保持默认 `true` 走 OAuth 更安全。
 
 ---
 
@@ -343,8 +441,12 @@ docker compose -f deploy/docker-compose.yml up -d
 | `embedding.model` | embedding 模型 | 云端 `gemini-embedding-001` / 本地 `bge-m3` |
 | `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
 | `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
+| `hooks.token` | `/breath-hook`、`/dream-hook` 的 HTTP token | 自托管公网建议设置 |
+| `hooks.allow_public` | 是否允许 hook 无鉴权访问 | `false` |
 
 > ⚠️ **`dehydration.max_tokens` 不能太小**：Gemini 2.5 系列模型有「思考 token」开销，如果 max_tokens 设得太小（如 256/512），思考 token 会耗尽预算，JSON 响应被截断，导致所有记忆被错误分类为「未分类」。推荐 `gemini-2.0-flash`（无思考开销）或将 max_tokens 设为 `4096` 以上。
+
+> 🔐 **Hook 安全默认值**：`/breath-hook` 和 `/dream-hook` 默认不再公开。它们接受 Dashboard 登录 cookie，或 `hooks.token` / `OMBRE_HOOK_TOKEN`，token 可通过 `?token=...`、`X-Ombre-Hook-Token` 或 `Authorization: Bearer ...` 传入。只有在反向代理、Cloudflare Access 等外层已经做鉴权时，才建议把 `hooks.allow_public` / `OMBRE_HOOK_ALLOW_PUBLIC` 设为 `true`。
 
 ### Embedding 两后端：云端 Gemini vs 本地 bge-m3
 
@@ -355,20 +457,31 @@ docker compose -f deploy/docker-compose.yml up -d
 
 > 💾 **本地模型内存提醒**：bge-m3 加载后常驻约 2–3GB 内存。低配机器（<2GB 空闲内存）建议继续用云端；纯 CPU 即可推理，首条查询冷启动约 1–9s，之后 <0.5s。
 
-**本地向量化怎么搭（一键，无需命令行）**
+> 🧩 **用硅基流动（SiliconFlow）等 OpenAI 兼容云端向量化**：
+> **最省事：在 Dashboard ③ 引擎 → 向量化 顶部的「服务商预设」里选『硅基流动』**，会自动把 Base URL 和正确的模型名填好，你只要填 key → 保存 → 测试。脱水(LLM) 面板同理有预设。
+>
+> 想手动填也行（**两个最常踩的坑都在这**）：
+> - 格式：`OpenAI 兼容`
+> - Base URL：`https://api.siliconflow.cn/v1` —— **末尾必须带 `/v1`**，漏了会 404（page not found）
+> - Model：`BAAI/bge-m3` —— **必须带 `BAAI/` 前缀**，只写 `bge-m3` 会报 `Model does not exist`（免费，1024 维）
+> - 填完点「保存」，再点旁边的「**测试**」确认连得通（会直接显示成功维度或具体错误）。其它 OpenAI 兼容商（DeepSeek 等）同理：base_url 带正确后缀、model 用对方控制台里的完整名。
+
+**本地向量化怎么搭（离线、无需 key、不出网）**
 
 本地模型跑在一个独立的 `ollama` 容器里（OB 不直接管它，所以最稳）。两步：
 
-1. **启动 ollama 容器**（一次性）。用源码部署的话，`deploy/docker-compose.yml` 里已带 `ollama` 服务，直接：
+1. **启动自带的 ollama 容器**（一次性）。Docker 用户版 compose 已内置该服务（默认不启），加 `--profile local` 即可拉起：
    ```bash
-   docker compose -f deploy/docker-compose.yml up -d ollama
+   docker compose -f docker-compose.user.yml --profile local up -d
    ```
-   或独立起一个（和 OB 同一 docker 网络即可）：
-   ```bash
-   docker run -d --name ombre-ollama --restart unless-stopped \
-     --network <OB所在网络> -v ollama:/root/.ollama ollama/ollama
-   ```
-2. **Dashboard → 设置 → 向量化 → 「🖥️ 本地向量模型」面板 → 点「🚀 一键搭建本地向量化」**。它会自动：下载 bge-m3（约 1.2GB，带进度条）→ 切换后端 → 后台重算全库向量。期间照常使用，检索暂用旧库。
+   > 源码部署同理；或独立起一个（和 OB 同一 docker 网络、容器名 `ombre-ollama` 即可）：
+   > ```bash
+   > docker run -d --name ombre-ollama --restart unless-stopped \
+   >   --network <OB所在网络> -v ollama:/root/.ollama ollama/ollama
+   > ```
+   OB 在容器网络里通过 `ombre-ollama:11434` 自动连它（代码已内置该默认，无需额外配置）。
+2. **Dashboard → 设置 → 向量化 → 「🖥️ 本地向量模型」面板 → 点「🚀 一键本地化」**。它会自动：下载 bge-m3（约 1.2GB，带进度条）→ 切换后端 → 后台重算全库向量。期间照常使用，检索暂用旧库。
+   > 裸机 / 非 Docker 部署：同一个按钮会**直接在本机免提权安装 Ollama 运行时**（Win/Linux/mac），无需你手动起容器。
 
 > 🌐 **国内网络**：模型下载默认走 ollama 官方源。拉不动时，在面板「分步操作」里换下载镜像（选 ModelScope 或填自定义 registry 前缀），再点「仅下载」。
 
@@ -428,13 +541,34 @@ docker compose -f deploy/docker-compose.yml up -d
 | 所有记忆 domain 显示「未分类」 | `max_tokens` 太小，JSON 被截断 | 在 Dashboard ③ 引擎 或 `config.yaml` 将 `dehydration.max_tokens` 设为 `4096`；推荐用 `gemini-2.0-flash` 而非 2.5 系列 |
 | Claude.ai 添加 MCP 报「Couldn't register」 | OAuth 端点无法访问（通常是 Tunnel 未启动/域名错误） | 先确认 Dashboard 能正常访问，再添加 MCP |
 | OAuth 授权页正常弹出但密码输入后报错 | Dashboard 密码错误 | 使用 Dashboard 设置时的密码（不是 Cloudflare 密码） |
-| 连接成功但「no tools available」 | 连接到了 `/mcp-extra` 但期望 `/mcp`，或反之 | 检查 URL 末尾是 `/mcp` 还是 `/mcp-extra`；分别添加两个连接器 |
+| 连接成功但「no tools available」 | URL 末尾路径不是 `/mcp` | 确认连接 URL 末尾是 `/mcp` |
+| 每开新对话工具加载不全 / 偶尔搜不到某个工具 | **不是服务器问题**：同时启用的连接器太多时，Anthropic 客户端会改用 tool_search「延迟加载」，按描述去搜工具，命中带随机性 | 关掉该会话里用不到的其它连接器，把工具总数压到阈值以下即可一次性全部加载；或在 Claude.ai 自定义指令里列出全部工具名引导模型搜索 |
+| 工具调用显示「执行报错」但记忆其实写进去了 | **不是服务器问题**：服务端已成功返回，是 Claude.ai 连接器/渲染层把一次成功往返显示成了报错 | 用 `letter_read` 或 Dashboard 确认数据已落盘；服务端日志 `phase=ok` 即表示成功 |
+| 向量化不生效 / 语义检索没结果（压缩却正常） | base_url 漏 `/v1`（→404）、model 漏 `BAAI/` 前缀（→Model does not exist），或在 Dashboard 改了 key 没重建引擎 | 用 Dashboard 向量化区的「测试」按钮自查；按上面「用硅基流动…」一节填对 base_url 与 model；错误详情见设置页错误面板（OB-E001） |
+| 自有前端 / GPT / GLM 调用 MCP 工具被 401 卡住 | 默认强制 OAuth，自定义客户端不走该流程 | 设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）后重启；详见「方式三：接入自有前端」 |
 | Token 过期后无法自动重连 | Bearer token 默认 30 天有效 | 在 Claude.ai connector 设置里重新授权 |
 | Dashboard 401 | 未登录 / 密码错 | 浏览器重新登录 |
 | `hold` / `grow` 报 API key 错误 | LLM key 未配置 | Dashboard → ③ 引擎 填入 Key 点「保存 Key」，立即热更新 |
 | 重启后记忆丢失 | Volume 没挂载 | 检查 docker-compose volume 配置 |
 | Tunnel 状态红色 / 连接失败 | Token 无效或 cloudflared 报错 | 展开 Dashboard 红色错误框查看 cloudflared 输出；重新从 Cloudflare Zero Trust 获取 token |
 | 隧道连接偶尔断 | Cloudflare Free 闲置超时 | 内置 keepalive 已缓解；可在 Cloudflare Tunnel 设置里调整超时 |
+
+---
+
+## 容易忽略的点 / Easy-to-miss
+
+新用户最常踩、但文档里分散各处的点，集中提醒一下：
+
+- **只需加一个连接器 `/mcp`**：12 个工具全在这一个端点上，不用再单独加别的。
+- **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
+- **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
+- **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
+- **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
+- **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。重要数据可再开 GitHub 同步兜底（embeddings.db 不上传，靠「重算所有向量」恢复）。
+- **切换向量化后端会全库重算**：云端 3072 维和本地 bge-m3 1024 维不通用，每次切换都会重算，别频繁来回切。
+- **热更新按钮看部署方式**：Docker（有 restart 策略）点完自动恢复；裸机/纯 Python 需要 systemd/pm2 等守护，否则更新后要手动重启。点之前先「导出记忆备份」。
+- **自有前端 / GPT / GLM 接入**：默认强制 OAuth，会卡住非 Claude 客户端；设 `OMBRE_MCP_REQUIRE_AUTH=false` 关掉（注意别裸奔公网）。
+- **首次访问先设密码**：设完之后所有 `/api/*` 都要登录；忘了密码可用设置里的安全问题急救。
 
 ---
 

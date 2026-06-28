@@ -14,6 +14,33 @@ transport: "stdio"
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
+# --- MCP remote auth / MCP 远程鉴权开关 ---
+# true  (默认): HTTPS 连接 /mcp 时强制走 OAuth 2.1 + PKCE（Claude.ai 网页版需要）。
+# false: 完全跳过 OAuth，任何客户端（自有前端 / GPT / GLM / 自定义脚本）可免认证直连 /mcp。
+# 把 OB 接进自己的前端、调用 MCP 工具被 OAuth 卡住时，设为 false 即可。
+# 也可用环境变量 OMBRE_MCP_REQUIRE_AUTH=false 覆盖（Docker 用户更方便，优先级最高）。
+# ⚠️ 关掉后请确保服务不直接暴露公网，或在反代层另加鉴权——否则任何人都能读写记忆。
+# true (default): force OAuth 2.1 + PKCE on HTTPS /mcp connections (required by claude.ai web).
+# false: skip OAuth entirely so any client (your own frontend / GPT / GLM / custom scripts)
+#        can hit /mcp without auth. Set this when integrating OB into your own frontend and
+#        OAuth blocks your MCP tool calls. Env var OMBRE_MCP_REQUIRE_AUTH=false also works.
+# ⚠️ When disabled, do not expose the service directly to the public internet without
+#    another auth layer at the reverse proxy — otherwise anyone can read/write memories.
+mcp_require_auth: true
+
+# --- HTTP hooks auth / HTTP 钩子鉴权 ---
+# /breath-hook and /dream-hook are protected by default.
+# They accept the Dashboard login cookie, or this token via:
+#   ?token=...
+#   X-Ombre-Hook-Token: ...
+#   Authorization: Bearer ...
+# Set allow_public=true only behind another trusted auth layer.
+# /breath-hook 和 /dream-hook 默认不公开；可用 Dashboard 登录态或 token 调用。
+# 只有在反代层另有鉴权时，才建议显式打开 allow_public。
+hooks:
+  token: ""
+  allow_public: false
+
 # --- Bucket storage path / 记忆桶存储路径 ---
 # Point this to your Obsidian vault subdirectory, or any local folder
 # 指向你的 Obsidian 仓库子目录，或任意本地文件夹

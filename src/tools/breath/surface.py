@@ -58,8 +58,13 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     # pinned 优先级高于 anchor（她/他钉选的原则永远可见）。
     pinned_buckets = [
         b for b in all_buckets
-        if (b["metadata"].get("pinned") or b["metadata"].get("protected"))
+        if (
+            b["metadata"].get("pinned")
+            or b["metadata"].get("protected")
+            or b["metadata"].get("type") == "permanent"
+        )
         and b["metadata"].get("type") != "letter"
+        and not b["metadata"].get("anchor", False)  # 防御：anchor 是坐标系，永不主动浮现，即使 pinned
     ]
     pinned_ids = {b["id"] for b in pinned_buckets}
     pinned_results = []
@@ -82,7 +87,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     unresolved = [
         b for b in all_buckets_non_anchor
         if not b["metadata"].get("resolved", False)
-        and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self")
+        and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
         and not b["metadata"].get("dont_surface", False)
