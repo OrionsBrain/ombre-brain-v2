@@ -448,6 +448,46 @@ async def api_desire_recall(request: Request) -> Response:
     return JSONResponse({"ok": True, "count": len(memories), "memories": memories})
 
 
+@mcp.custom_route("/api/desire/breath", methods=["POST"])
+async def api_desire_breath(request: Request) -> Response:
+    """Orion 的身份 breath：给 nebula-daemon 的程序化读口（开场记忆载入）。
+    与 MCP 工具 breath 同一实现（_t_breath.dispatch），返回同一格式文本——
+    绕开 headless 一发式里 MCP 延迟加载/每发重连的抖动（A3 求助信 §3）。
+    Body(JSON，全可选): {query?: str, max_tokens?: int, domain?: str,
+        valence?: float, arousal?: float, max_results?: int,
+        importance_min?: int, tags?: str} —— 参数与 MCP breath 一一对应。
+    Auth: 请求头 X-Ombre-Secret == 环境变量 OMBRE_DESIRE_TOKEN。
+    只读记忆；不走 _with_notice（dashboard 删除通知留给 MCP 工具路径消费）。"""
+    from starlette.responses import JSONResponse
+    if not _check_desire_secret(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    def _num(key, default, cast):
+        try:
+            return cast(body.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        text = await _t_breath.dispatch(
+            query=str(body.get("query") or ""),
+            max_tokens=_num("max_tokens", 0, int),
+            domain=str(body.get("domain") or ""),
+            valence=_num("valence", -1, float),
+            arousal=_num("arousal", -1, float),
+            max_results=_num("max_results", 0, int),
+            importance_min=_num("importance_min", -1, int),
+            tags=str(body.get("tags") or ""),
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "text": text})
+
+
 # =============================================================
 # 仪表板硬删除通知队列（Dashboard Hard Purge Notification）
 # 她/他从仪表板彻底删除记忆后，下次 Claude 调用任何工具时一次性通知。
