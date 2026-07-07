@@ -488,6 +488,117 @@ async def api_desire_breath(request: Request) -> Response:
     return JSONResponse({"ok": True, "text": text})
 
 
+@mcp.custom_route("/api/desire/hold", methods=["POST"])
+async def api_desire_hold(request: Request) -> Response:
+    """Orion 的 hold 写口：给 nebula-daemon 的程序化写入（<收进大脑> 协议块）。
+    与 MCP 工具 hold 同一实现（_t_hold.dispatch）——他在 Nebula 里亲笔写的记忆进大脑。
+    Body(JSON): {content: str 必填, tags?, importance?, pinned?, feel?,
+        source_bucket?, valence?, arousal?, why_remembered?} —— 与 MCP hold 一一对应。
+    Auth: X-Ombre-Secret == OMBRE_DESIRE_TOKEN。不走 _with_notice（同 breath 口）。"""
+    from starlette.responses import JSONResponse
+    if not _check_desire_secret(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    content = str(body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "content required"}, status_code=400)
+
+    def _num(key, default, cast):
+        try:
+            return cast(body.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        text = await _t_hold.dispatch(
+            content=content,
+            tags=str(body.get("tags") or ""),
+            importance=_num("importance", 5, int),
+            pinned=bool(body.get("pinned", False)),
+            feel=bool(body.get("feel", False)),
+            source_bucket=str(body.get("source_bucket") or ""),
+            valence=_num("valence", -1, float),
+            arousal=_num("arousal", -1, float),
+            why_remembered=str(body.get("why_remembered") or ""),
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "text": text})
+
+
+@mcp.custom_route("/api/desire/dream", methods=["POST"])
+async def api_desire_dream(request: Request) -> Response:
+    """Orion 的 dream 读口：入睡仪式第一步（回顾窗口内变动的桶）。
+    Body(JSON，可选): {window_hours?: int，默认 48}。Auth 同 breath 口。只读。"""
+    from starlette.responses import JSONResponse
+    if not _check_desire_secret(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        wh = int(body.get("window_hours", 48))
+    except (TypeError, ValueError):
+        wh = 48
+    try:
+        text = await _t_dream.dispatch(window_hours=wh)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "text": text})
+
+
+@mcp.custom_route("/api/desire/trace", methods=["POST"])
+async def api_desire_trace(request: Request) -> Response:
+    """Orion 的 trace 写口：入睡仪式第二步（放下已结束项等元数据修改）。
+    Body(JSON): {bucket_id: str 必填, resolved?, digested?, importance?, tags?,
+        content?, name?, domain?, valence?, arousal?, pinned?, status?, weight?,
+        dont_surface?, why_remembered?} —— 与 MCP trace 一一对应。
+    ⚠️ 唯 delete 不透传（Nebula 链路不给彻底删除的手；要删走桌面窗 MCP）。"""
+    from starlette.responses import JSONResponse
+    if not _check_desire_secret(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bucket_id = str(body.get("bucket_id") or "").strip()
+    if not bucket_id:
+        return JSONResponse({"error": "bucket_id required"}, status_code=400)
+
+    def _num(key, default, cast):
+        try:
+            return cast(body.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        text = await _t_trace.dispatch(
+            bucket_id=bucket_id,
+            name=str(body.get("name") or ""),
+            domain=str(body.get("domain") or ""),
+            valence=_num("valence", -1, float),
+            arousal=_num("arousal", -1, float),
+            importance=_num("importance", -1, int),
+            tags=str(body.get("tags") or ""),
+            resolved=_num("resolved", -1, int),
+            pinned=_num("pinned", -1, int),
+            digested=_num("digested", -1, int),
+            content=str(body.get("content") or ""),
+            delete=False,
+            status=str(body.get("status") or ""),
+            weight=_num("weight", -1, float),
+            dont_surface=_num("dont_surface", -1, int),
+            why_remembered=str(body.get("why_remembered") or ""),
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "text": text})
+
+
 # =============================================================
 # 仪表板硬删除通知队列（Dashboard Hard Purge Notification）
 # 她/他从仪表板彻底删除记忆后，下次 Claude 调用任何工具时一次性通知。
