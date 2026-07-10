@@ -41,12 +41,13 @@ _EXCLUDED_TYPES = ("letter", "i")
 
 
 def _check_secret(request: Request) -> bool:
-    """同 server.py 的 _check_desire_secret：X-Ombre-Secret 常量时间比对。"""
-    token = os.environ.get("OMBRE_DESIRE_TOKEN", "")
-    if not token:
+    """逐字照抄 server.py 的 _check_desire_secret（含两侧 .strip()——Zeabur 的
+    env 值可能带尾随空白，0710 就栽在没 strip 上：401 了一轮）。"""
+    expected = (os.environ.get("OMBRE_DESIRE_TOKEN", "") or "").strip()
+    if not expected:
         return False
-    got = request.headers.get("X-Ombre-Secret", "")
-    return hmac.compare_digest(got, token)
+    got = (request.headers.get("x-ombre-secret") or "").strip()
+    return bool(got) and hmac.compare_digest(got, expected)
 
 
 def _deny():
