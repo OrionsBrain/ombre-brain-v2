@@ -29,6 +29,7 @@ from . import github
 from . import embedding
 from . import ollama_local
 from . import config_api
+from . import daemon_ro
 
 
 def register_all(mcp) -> None:
@@ -49,3 +50,4 @@ def register_all(mcp) -> None:
     embedding.register(mcp)
     ollama_local.register(mcp)
     config_api.register(mcp)
+    daemon_ro.register(mcp)
