@@ -9,8 +9,9 @@ tools/_common.py — 跨工具共享的辅助逻辑
 
 关键行为：
 - check_content_size / check_pinned_quota：读取 config.limits，超限返回中文提示串
-- merge_or_create：先用语义检索找近似桶；超过阈值则合并（hold 用原文拼接，
-  grow 用 LLM 压缩），否则新建；写完投递 embedding 队列并刷新脱水缓存
+- merge_or_create：先用多维检索找近似桶；只有普通 dynamic 桶在超过阈值且
+  同一事件判定通过后才合并（hold 用原文拼接，grow 用 LLM 压缩），否则新建；
+  返回兼容旧三元组的 MergeOutcome，附带最近桶、邻近分、阈值与决定原因
 - iter 2.0：merge_or_create 接受 ``source_tool`` / ``grow_batch_id``，
   新建时写入 frontmatter；合并时不动原桶 source_tool，只追加 ``last_merged_by``
 - check_duplicate_for：fire-and-forget 标记疑似重复对（不自动合并）
@@ -22,22 +23,23 @@ tools/_common.py — 跨工具共享的辅助逻辑
 - 不做日志格式化以外的副作用包装；调用方自行决定是否 await
 
 对外暴露：limits_cfg / max_bucket_bytes / max_pinned / check_content_size /
-         count_pinned / check_pinned_quota / merge_or_create /
+         count_pinned / check_pinned_quota / MergeOutcome / merge_or_create /
          check_duplicate_for / check_plan_resolution
 ========================================
 """
 
-from typing import Tuple
 import asyncio
 from copy import deepcopy
 from concurrent.futures import Future, InvalidStateError
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 import hashlib
 import math
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Any, Iterator
 import uuid
 
 from utils import parse_bool
@@ -95,6 +97,69 @@ _CONTENT_LOCK_POLL_SECONDS = 0.01
 _CONTENT_LOCK_STALE_MIN_SECONDS = 180.0
 _CONTENT_LOCK_STALE_GRACE_SECONDS = 60.0
 _CONTENT_LOCK_WAIT_GRACE_SECONDS = 30.0
+
+
+@dataclass(frozen=True, eq=False)
+class MergeOutcome:
+    """Merge/create result plus auditable landing evidence.
+
+    Iteration intentionally exposes only the historical three-tuple so older
+    callers can keep using ``bucket_id, merged, warning = result``.  The named
+    fields are an additive receipt contract for hold and private HTTP.
+    """
+
+    bucket_id: str
+    merged: bool
+    embedding_warning: str = ""
+    action: str = "created"
+    reason: str = "created_no_candidate"
+    merge_threshold: float = 75.0
+    nearest_id: str = ""
+    nearest_name: str = ""
+    nearest_score: float | None = None
+    same_event_confidence: float | None = None
+    protected_kind: str = ""
+    content_changed: bool = True
+
+    def _legacy(self) -> tuple[str, bool, str]:
+        return self.bucket_id, self.merged, self.embedding_warning
+
+    def __iter__(self) -> Iterator[str | bool]:
+        return iter(self._legacy())
+
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, index):
+        return self._legacy()[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, MergeOutcome):
+            return self.__dict__ == other.__dict__
+        if isinstance(other, tuple):
+            return self._legacy() == other
+        return NotImplemented
+
+    __hash__ = None
+
+    def as_receipt(self) -> dict[str, Any]:
+        nearest = None
+        if self.nearest_id:
+            nearest = {
+                "bucket_id": self.nearest_id,
+                "name": self.nearest_name or self.nearest_id,
+                "score": self.nearest_score,
+                "score_kind": "retrieval_0_100",
+            }
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "bucket_id": self.bucket_id,
+            "merge_threshold": self.merge_threshold,
+            "nearest": nearest,
+            "same_event_confidence": self.same_event_confidence,
+            "protected_kind": self.protected_kind or None,
+        }
 
 # Per-content turns use concurrent futures rather than asyncio.Lock. FastMCP may
 # dispatch independent HTTP sessions from different event loops/threads;
@@ -518,6 +583,28 @@ def is_terminal_memory_metadata(metadata: dict | None) -> bool:
     )
 
 
+def auto_merge_protection_kind(metadata: dict | None) -> str:
+    """Return the boundary that prevents a bucket from being auto-merged.
+
+    Only ordinary dynamic memories participate in automatic consolidation.
+    Explicit permanent memories remain protected even when they are not pinned;
+    feel/plan/letter/I each have their own lifecycle and must not be rewritten
+    by an ordinary hold or grow landing decision.
+    """
+    if not isinstance(metadata, dict):
+        return ""
+    if is_terminal_memory_metadata(metadata):
+        return "terminal"
+    if parse_bool(metadata.get("pinned"), default=False):
+        return "pinned"
+    if parse_bool(metadata.get("protected"), default=False):
+        return "protected"
+    bucket_type = str(metadata.get("type") or "dynamic").strip().lower()
+    if bucket_type and bucket_type != "dynamic":
+        return bucket_type
+    return ""
+
+
 def is_importance_audit_candidate(
     metadata: dict | None,
     minimum: int,
@@ -672,7 +759,7 @@ async def merge_or_create(
     meaning: str = "",
     media: list | str | None = None,
     test_data: bool = False,
-) -> Tuple[str, bool, str]:
+) -> MergeOutcome:
     """
     检查是否有相似桶可合并，有则合并，无则新建。返回 (桶ID或名称, 是否合并, embed警告信息)。
 
@@ -704,9 +791,9 @@ async def merge_or_create(
     # identical-content、merge-target 与 quota turns 都已释放。独立/兼容
     # 运行时即使需要同步调用 provider，也不能继续占用这些写入协调锁。
     post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
-    if callable(post_index) and result[0]:
+    if callable(post_index) and result.bucket_id and result.content_changed:
         await post_index(
-            result[0],
+            result.bucket_id,
             content_changed=True,
             meaning_changed=bool(meaning),
         )
@@ -729,14 +816,16 @@ async def _merge_or_create_inner(
     media: list | str | None = None,
     test_data: bool = False,
     _defer_derived_index: bool = False,
-) -> Tuple[str, bool, str]:
+) -> MergeOutcome:
     """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
     exact_storage_match = False
+    search_failed = False
     try:
         existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
     except Exception as e:
         rt.logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
         existing = []
+        search_failed = True
 
     # Cache invalidation and a concurrent list_all() refresh can cross: an old
     # parsed snapshot may briefly hide a bucket that is already durable on disk.
@@ -757,7 +846,43 @@ async def _merge_or_create_inner(
                 existing = [exact]
                 exact_storage_match = True
 
-    merge_threshold = rt.config.get("merge_threshold") or 75
+    try:
+        merge_threshold = float(rt.config.get("merge_threshold") or 75)
+    except (TypeError, ValueError, OverflowError):
+        merge_threshold = 75.0
+
+    nearest_id = ""
+    nearest_name = ""
+    nearest_score: float | None = None
+    if existing:
+        nearest = existing[0]
+        nearest_id = str(nearest.get("id") or "").strip()
+        nearest_meta = nearest.get("metadata", {})
+        if not isinstance(nearest_meta, dict):
+            nearest_meta = {}
+        nearest_name = str(
+            nearest_meta.get("name")
+            or nearest.get("name")
+            or nearest_id
+        ).strip()
+        try:
+            raw_score = float(nearest.get("score", 0))
+        except (TypeError, ValueError, OverflowError):
+            raw_score = 0.0
+        if math.isfinite(raw_score):
+            nearest_score = round(raw_score, 2)
+
+    if search_failed:
+        decision_reason = "created_search_failed"
+    elif test_data:
+        decision_reason = "created_test_data"
+    elif existing:
+        decision_reason = "created_below_threshold"
+    else:
+        decision_reason = "created_no_candidate"
+    same_event_confidence: float | None = None
+    protected_kind = ""
+
     if (
         not test_data
         and existing
@@ -775,13 +900,27 @@ async def _merge_or_create_inner(
                 for _attempt in range(3):
                     bucket = await rt.bucket_mgr.get(candidate_id)
                     if not bucket:
+                        decision_reason = "created_target_unavailable"
                         break
                     metadata = bucket.get("metadata", {})
                     if not isinstance(metadata, dict):
                         metadata = {}
-                    if parse_bool(metadata.get("pinned"), default=False) or parse_bool(
-                        metadata.get("protected"), default=False
-                    ) or is_terminal_memory_metadata(metadata):
+                    protected_kind = auto_merge_protection_kind(metadata)
+                    if protected_kind:
+                        if exact_storage_match:
+                            return MergeOutcome(
+                                bucket_id=candidate_id,
+                                merged=True,
+                                action="existing",
+                                reason="matched_exact_protected",
+                                merge_threshold=merge_threshold,
+                                nearest_id=nearest_id,
+                                nearest_name=nearest_name,
+                                nearest_score=nearest_score,
+                                protected_kind=protected_kind,
+                                content_changed=False,
+                            )
+                        decision_reason = "created_protected_target"
                         break
                     snapshot_content = str(bucket.get("content") or "")
                     snapshot_metadata = deepcopy(metadata)
@@ -793,8 +932,18 @@ async def _merge_or_create_inner(
                                 "Same-event judge unavailable; creating new bucket / "
                                 "同一事件判定器不可用，保守新建"
                             )
+                            decision_reason = "created_judge_unavailable"
                             break
-                        judgement = await judge(snapshot_content, content)
+                        try:
+                            judgement = await judge(snapshot_content, content)
+                        except Exception as judge_exc:
+                            rt.logger.warning(
+                                "Same-event judge failed; creating new bucket / "
+                                "同一事件判定失败，保守新建: %s",
+                                judge_exc,
+                            )
+                            decision_reason = "created_judge_failed"
+                            break
                         same_event = parse_bool(
                             judgement.get("same_event", False), default=False
                         )
@@ -802,7 +951,9 @@ async def _merge_or_create_inner(
                             confidence = float(judgement.get("confidence", 0.0))
                         except (TypeError, ValueError):
                             confidence = 0.0
+                        same_event_confidence = confidence
                         if not same_event or confidence < _SAME_EVENT_CONFIDENCE_MIN:
+                            decision_reason = "created_separate_event"
                             rt.logger.info(
                                 "op=merge_or_create phase=branch branch=separate_event "
                                 f"bucket_id={candidate_id} confidence={confidence:.3f} "
@@ -883,7 +1034,14 @@ async def _merge_or_create_inner(
                         locked_metadata = locked_bucket.get("metadata", {})
                         if not isinstance(locked_metadata, dict):
                             locked_metadata = {}
-                        if is_terminal_memory_metadata(locked_metadata) or (
+                        locked_protection = auto_merge_protection_kind(
+                            locked_metadata
+                        )
+                        if locked_protection:
+                            protected_kind = locked_protection
+                            decision_reason = "created_protected_target"
+                            continue
+                        if (
                             str(locked_bucket.get("content") or "")
                             != snapshot_content
                             or locked_metadata != snapshot_metadata
@@ -922,6 +1080,7 @@ async def _merge_or_create_inner(
                             **update_kwargs,
                         )
                         if not committed:
+                            decision_reason = "created_merge_update_failed"
                             break
 
                     queue_captured = getattr(
@@ -955,14 +1114,30 @@ async def _merge_or_create_inner(
                         f"source_tool={source_tool or '_'} "
                         f"score={existing[0].get('score', 0):.3f}"
                     )
-                    return candidate_id, True, ""
+                    return MergeOutcome(
+                        bucket_id=candidate_id,
+                        merged=True,
+                        action="merged",
+                        reason=(
+                            "merged_exact"
+                            if exact_storage_match
+                            else "merged_same_event"
+                        ),
+                        merge_threshold=merge_threshold,
+                        nearest_id=nearest_id,
+                        nearest_name=nearest_name,
+                        nearest_score=nearest_score,
+                        same_event_confidence=same_event_confidence,
+                    )
                 else:
+                    decision_reason = "created_merge_conflict"
                     rt.logger.warning(
                         "Merge target changed repeatedly; creating a new bucket "
                         "instead of overwriting concurrent edits: %s",
                         candidate_id,
                     )
         except Exception as e:
+            decision_reason = "created_merge_failed"
             rt.logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
     async def create_bucket(final_importance: int) -> str:
@@ -1106,7 +1281,19 @@ async def _merge_or_create_inner(
         f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
         f"embedding_state={embedding_state}"
     )
-    return bucket_id, False, embed_warn
+    return MergeOutcome(
+        bucket_id=bucket_id,
+        merged=False,
+        embedding_warning=embed_warn,
+        action="created",
+        reason=decision_reason,
+        merge_threshold=merge_threshold,
+        nearest_id=nearest_id,
+        nearest_name=nearest_name,
+        nearest_score=nearest_score,
+        same_event_confidence=same_event_confidence,
+        protected_kind=protected_kind,
+    )
 
 
 async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: float = _DUP_DEFAULT_THRESHOLD) -> None:

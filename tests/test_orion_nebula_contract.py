@@ -241,6 +241,43 @@ async def test_hold_keeps_text_and_adds_structured_bucket_id(
 
 
 @pytest.mark.asyncio
+async def test_hold_adds_optional_landing_receipt_without_changing_text_parser(
+    monkeypatch, registered
+):
+    async def fake_dispatch(**kwargs):
+        kwargs["_receipt_out"].update({
+            "action": "created",
+            "reason": "created_below_threshold",
+            "bucket_id": "memory-new",
+            "merge_threshold": 75.0,
+            "nearest": {
+                "bucket_id": "memory-old",
+                "name": "旧主题",
+                "score": 67.0,
+                "score_kind": "retrieval_0_100",
+            },
+            "same_event_confidence": None,
+            "protected_kind": None,
+        })
+        return (
+            "新建→memory-new relation\n"
+            "落点：最邻近「旧主题」67/100，未超过合并线 75，因此新建。"
+        )
+
+    monkeypatch.setattr(nebula_routes._tool_hold, "dispatch", fake_dispatch)
+    response = await registered.routes[
+        ("POST", "/api/desire/hold")
+    ](_request(body={"content": "一段新记忆"}))
+    payload = _payload(response)
+
+    assert response.status_code == 200
+    assert payload["bucket_id"] == "memory-new"
+    assert payload["text"].startswith("新建→memory-new relation\n")
+    assert payload["receipt"]["reason"] == "created_below_threshold"
+    assert payload["receipt"]["nearest"]["score_kind"] == "retrieval_0_100"
+
+
+@pytest.mark.asyncio
 async def test_trace_forces_non_delete_and_does_not_expose_new_dangerous_fields(
     monkeypatch, registered
 ):

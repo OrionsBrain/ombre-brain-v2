@@ -151,6 +151,7 @@ def register(mcp) -> None:
         content = str(body.get("content") or "").strip()
         if not content:
             return JSONResponse({"error": "content required"}, status_code=400)
+        landing_receipt: dict = {}
         try:
             text = await _tool_hold.dispatch(
                 content=content,
@@ -162,6 +163,7 @@ def register(mcp) -> None:
                 valence=coerce_number(body, "valence", -1, float),
                 arousal=coerce_number(body, "arousal", -1, float),
                 why_remembered=str(body.get("why_remembered") or ""),
+                _receipt_out=landing_receipt,
             )
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
@@ -169,6 +171,8 @@ def register(mcp) -> None:
         bucket_id = extract_bucket_id(text)
         if bucket_id:
             payload["bucket_id"] = bucket_id
+        if landing_receipt:
+            payload["receipt"] = landing_receipt
         return JSONResponse(payload)
 
     @mcp.custom_route("/api/desire/dream", methods=["POST"])

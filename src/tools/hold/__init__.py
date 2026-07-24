@@ -49,6 +49,7 @@ async def dispatch(
     meaning: Optional[str] = "",
     media: Optional[list | str] = None,
     test_data: Optional[bool] = False,
+    _receipt_out: Optional[dict] = None,
 ) -> str:
     content = "" if content is None else str(content)
     if tags is None:
@@ -171,6 +172,7 @@ async def dispatch(
             why_remembered=why_remembered,
             meaning=meaning,
             media=media,
+            receipt_out=_receipt_out,
         )
         return result
 
@@ -196,5 +198,6 @@ async def dispatch(
         meaning=meaning,
         media=media,
         test_data=test_data,
+        receipt_out=_receipt_out,
     )
     return result

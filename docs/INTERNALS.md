@@ -301,8 +301,8 @@ feel 桶自身：
 
 两种路径：
 
-- **Feel 模式** (`feel=True`)：跳过 LLM 分析，自动注入 `__feel__` 标签，写入 `feel/沉淀物/`。`source_bucket` 提供时把源桶标记为 `digested=True` 并写 `model_valence`。返回 `🫧feel→{id}`。
-- **普通模式**：`analyze()` → 用户传入的 `valence`/`arousal` 优先于 LLM 结果（B-09 修复）→ `_merge_or_create(raw_merge=True)`（相似度 > `merge_threshold` 时以分隔线追加原文，否则新建）→ 原文落盘后投递 embedding outbox → 异步触发 `_check_plan_resolution()` 扫 active plans。返回 `合并→{name}` 或 `新建→{name}`。`analyze()` 或 embedding 不可用时只降级元数据/向量索引，正文仍原样落盘；**hold 永远不调 `dehydrate()`/`merge()` 压缩正文**。
+- **Feel 模式** (`feel=True`)：跳过 LLM 分析，自动注入 `__feel__` 标签，写入 `feel/沉淀物/`。`source_bucket` 提供时把源桶标记为 `digested=True` 并写 `model_valence`。返回第一段 `🫧feel→{id}`，随后附本地向量回声；托管 outbox 尚未完成时返回 queued/pending，不为了即时查重额外调用 provider。
+- **普通模式**：`analyze()` → 用户传入的 `valence`/`arousal` 优先于 LLM 结果（B-09 修复）→ `_merge_or_create(raw_merge=True)`。搜索结果的 `score` 是语义/关键词/时间/情绪/重要度等共同形成的 0~100 **多维邻近分**，不是纯余弦相似度；超过 `merge_threshold` 后还必须通过同一事件高置信判定。只有 `type=dynamic` 且非 pinned/protected/terminal 的桶可以自动合并，hold 以分隔线追加原文；其它情况新建。逐字命中受保护桶时不改写、不另造重复桶，只返回已有落点。原文落盘后投递 embedding outbox，并异步触发 `_check_plan_resolution()`。返回第一段仍是 `合并→{name}` 或 `新建→{name}`，随后附最近桶、邻近分、合并线与决定原因；旧客户端仍可按第一段解析 ID。`analyze()` 或 embedding 不可用时只降级元数据/向量索引，正文仍原样落盘；**hold 永远不调 `dehydrate()`/`merge()` 压缩正文**。
 - `meaning` 追加一条“为什么值得被想起”的第一人称含义；`media` 接受持久化前可读取路径或 `data_base64+filename` 项，失败时不写失效引用。
 - `test_data=True` 只在创建时写入不可后补的可擦除 provenance，并禁止与 pinned/feel 组合；这是 `trace(hard_delete=True)` 唯一允许物理删除的来源边界。
 
