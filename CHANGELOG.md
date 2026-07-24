@@ -2,6 +2,18 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.9.0
+
+### 新增 / Added
+
+- 以隔离的 `orionsbrain_ext.nebula` 扩展恢复 Orion 私有 desire HTTP 合同：五组兼容 POST 与六组 Nebula Dashboard 只读 GET，不再把 fork 改造散落在 `server.py`。
+- 私有路由继续使用 fail-closed 的 `X-Ombre-Secret` 鉴权；`trace` HTTP 入口强制 `delete=False`，不暴露硬删除、恢复或局部替换等新增写能力。
+- `breath` 兼容 Nebula bridge 的 JSON 标签数组并转换为 Ombre 标签字符串；`hold` 在保留旧 `text` 回执的同时，尽可能增加结构化 `bucket_id`。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.9.0`。
+
 ## 2.8.9
 
 ### 修复 / Fixed

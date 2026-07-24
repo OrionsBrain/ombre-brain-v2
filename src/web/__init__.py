@@ -34,6 +34,13 @@ from . import onboarding
 from . import v3_debug
 
 
+def _register_orion_nebula(mcp) -> None:
+    """延迟导入私有扩展，避免扩展读取 web._shared 时形成装配环。"""
+    from orionsbrain_ext import nebula as orion_nebula
+
+    orion_nebula.register(mcp)
+
+
 _WEB_MODULES = (
     ("web.auth", auth.register),
     ("web.tunnel", tunnel.register),
@@ -53,6 +60,7 @@ _WEB_MODULES = (
     ("web.config_api", config_api.register),
     ("web.onboarding", onboarding.register),
     ("web.v3_debug", v3_debug.register),
+    ("orionsbrain_ext.nebula", _register_orion_nebula),
 )
 
 
